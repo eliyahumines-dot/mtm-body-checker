@@ -39,19 +39,28 @@ template (`UNVERIFIED-PRIMARY`, cross-checked across multiple mirrors):
 **No primary source directly and unambiguously states whether numeric
 measurements derived from an SMPL/SMPL-X mesh — as opposed to a
 redistributed mesh file — count as a restricted "artifact... for commercial
-purposes."** Given the breadth of that phrase, and given that MPI-IS
-clearly does have a mechanism for licensing narrower commercial outputs
-(the CC-BY carve-out) which they chose not to extend to the general model,
-the conservative and only currently defensible reading is: **treat any
-commercial use of a pipeline that runs SMPL, SMPL-X, SMPLify, STAR, ICON,
-ECON, CameraHMR, Multi-HMR, or any other tool that loads these models at
-runtime as requiring a paid MPI-IS/Meshcapade commercial license**, even if
-the customer-facing product only ever shows numbers, never a mesh.
+purposes."** We do not draw a legal conclusion from this ambiguity — that is
+not ours to determine from source-reading alone, and Task 02 revised this
+section's framing accordingly (2026-09, corrects Task 01's "verdict"
+language below).
 
-**Verdict: `UNKNOWN — HIGH RISK, FLAG FOR LEGAL REVIEW.`** Do not build the
-commercial product on an SMPL/SMPL-X-dependent pipeline without either (a)
-a lawyer's opinion that measurement-only output is exempt, or (b) a
-confirmed, priced commercial license.
+**Standing engineering/business decision (not a legal conclusion):** SMPL,
+SMPL-X, SMPLify, and STAR carry enough licensing uncertainty and potential
+cost that they are **excluded from the initial commercial-oriented POC**,
+along with every tool that loads them at runtime (SMPL-Anthropometry,
+4D-Humans/HMR2.0, ICON, ECON, CameraHMR, Multi-HMR, CALVIS, and the
+Landmarks2Anthropometry family) — **unless and until explicit, suitable
+commercial licensing is obtained** for the specific model in use. This
+decision holds regardless of how the underlying legal question eventually
+resolves; it is a project-scope choice, not a claim about what the license
+text legally permits. Task 02's implemented pipeline
+(`experiments/sam3d_mhr_clad_smoke/`) uses no SMPL-family component for
+exactly this reason — it is built entirely on SAM 3D Body's own MHR body
+model instead (see the row below).
+
+If this project later wants to use an SMPL/SMPL-X-dependent tool
+commercially, the concrete next step is a lawyer's opinion or a confirmed,
+priced commercial license — not further source-reading here.
 
 ### Additional uncertainty: Meshcapade / Epic Games
 
@@ -69,8 +78,9 @@ identified, with no SMPL/SMPL-X dependency:
 
 | Component | License(s) | Notes |
 |---|---|---|
-| SAM 3D Body (Meta) | Meta "SAM License" (code + weights) | Custom text, not OSI-standard; explicitly permits commercial use, bans military/surveillance/ITAR use. Read the exact license text before shipping — "SAM License" is not a recognized SPDX identifier and could carry Meta-specific conditions not captured by a one-line summary. |
-| clad-body | Apache-2.0 | Targets Anny/MHR, not SMPL — this is what keeps it out of the SMPL question |
+| SAM 3D Body (Meta) — **inference checkpoint** | Meta "SAM License" (code + weights) | Custom text, not OSI-standard; explicitly permits commercial use, bans military/surveillance/ITAR use. Read the exact license text before shipping — "SAM License" is not a recognized SPDX identifier and could carry Meta-specific conditions not captured by a one-line summary. Checkpoint download is separately **gated behind manual Hugging Face access approval** (confirmed directly from `INSTALL.md`, Task 02) — a licensing/access question distinct from the license terms themselves. |
+| MHR (Momentum Human Rig) — **body model/rig assets** | **Apache-2.0**, confirmed by reading the `LICENSE.txt` bundled directly inside the public `assets.zip` release (Task 02) | Distinct artifact from the SAM 3D Body checkpoint above, despite the shared "MHR" name — this is the actual 3D body geometry/rig, publicly downloadable with **no authentication required** from `github.com/facebookresearch/MHR/releases`. Task 01 only characterized "the MHR ecosystem" generally as Apache-2.0; Task 02 confirms this at the asset-file level specifically, which matters because SMPL's restrictive license famously applies at exactly this level (the body model file itself, not just wrapper code). |
+| clad-body | Apache-2.0 | Targets Anny/MHR, not SMPL — this is what keeps it out of the SMPL question. Confirmed installable and importable (Task 02); its MHR loading path is currently blocked in our test environment by an unrelated native/dependency issue, not a licensing one — see `TASK02_SAM3D_MHR_CLAD_SMOKE_TEST.md`. |
 | SAM2 (Meta) | Apache-2.0 | Code, checkpoints, and training code all Apache-2.0 |
 | MediaPipe Pose / BlazePose (Google) | Apache-2.0 | On-device, mobile-native |
 | RTMPose (OpenMMLab) | Apache-2.0 | Mobile-proven alternative to MediaPipe |

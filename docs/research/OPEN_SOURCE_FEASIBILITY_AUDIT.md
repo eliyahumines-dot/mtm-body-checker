@@ -64,7 +64,8 @@ in "Other candidates surveyed" and detailed in `CANDIDATE_MATRIX.md`.
 - Code & weight license: Meta's custom **"SAM License"** — explicitly permits commercial and non-commercial use, bans military/surveillance/ITAR use, requires attribution. Not an OSI/SPDX-standard license text; read it directly before relying on the "commercial OK" read.
 - REPORTED: robust full-body mesh recovery. REPRODUCED: not attempted by us. RELEVANT: an **independent** paper (arXiv 2601.06035, not Meta) specifically studied anthropometric fidelity and found SAM 3D Body **regresses toward "standardized" body shapes** for atypical bodies (geriatric muscle atrophy, scoliosis, pregnancy, amputation, obesity) — a materially negative signal for MTM, whose value proposition is precisely non-average bodies. UNKNOWN: absolute-cm accuracy on any body type — must be benchmarked.
 - Integration complexity: newest of all candidates, least battle-tested; expect rough edges.
-- Exact experiment needed: run on a small set of known-measurement bodies (see POC_RECOMMENDATION.md) and check whether the "regression to standard shape" failure mode described in 2601.06035 reproduces and how badly it corrupts girth measurements.
+- **Update (Task 02):** checkpoint access confirmed gated behind manual Hugging Face approval (`INSTALL.md`), not obtainable without a human requesting and being approved — this blocked actual inference in Task 02's environment. The MHR *body model/rig asset files* (distinct from this inference checkpoint) are separately, publicly downloadable under Apache-2.0 with no gating — see `LICENSE_AND_COMMERCIAL_USE.md`. Metric scale: confirmed from source that SAM 3D Body's demo pipeline uses MoGe2 to estimate camera FOV by default, falling back to a **fixed default FOV constant** (not derived from the photo) if no FOV estimator is supplied — so absolute-scale plausibility depends entirely on whether a real FOV estimator is used. Full detail: `docs/experiments/TASK02_SAM3D_MHR_CLAD_SMOKE_TEST.md`.
+- Exact experiment needed: run on a small set of known-measurement bodies (see POC_RECOMMENDATION.md) and check whether the "regression to standard shape" failure mode described in 2601.06035 reproduces and how badly it corrupts girth measurements. Still not attempted — blocked by checkpoint access in Task 02.
 
 ### 4D-Humans / HMR 2.0 (UC Berkeley)
 - Repo: `github.com/shubham-goel/4D-Humans` · Paper: ICCV 2023, arXiv 2305.20091. Last commit Feb 2026 — lightly maintained, mature/well-known.
@@ -89,7 +90,8 @@ in "Other candidates surveyed" and detailed in `CANDIDATE_MATRIX.md`.
 - Algorithm: convex-hull plane-sweep circumference (built to emulate how a physical tape bridges body concavities), partially differentiable (PyTorch autograd) for optimization-based fitting.
 - REPORTED: README table claims sub-cm MAE. RELEVANT: **that MAE is the library's own differentiable path benchmarked against its own non-differentiable path — not against real human tape measurements.** No independent ground-truth validation found. UNKNOWN — MUST BE BENCHMARKED against real people.
 - Commercial use: Apache-2.0, no restriction. Best-licensed measurement-extraction candidate.
-- Exact experiment needed: pair with SAM 3D Body's MHR output (may require a conversion/adaptation layer — untested) and compare resulting measurements to a small set of people with known tape measurements.
+- **Update (Task 02):** the SAM3D→clad-body conversion is now resolved, implemented, and unit-tested — not a drop-in pass-through (SAM 3D Body's own `scale_params` output is 28-dim PCA coefficients that would silently corrupt clad-body's loader if forwarded as-is; the fix is to forward only `shape_params` and `mhr_model_params`). See `experiments/sam3d_mhr_clad_smoke/adapter.py` and `TASK02_SAM3D_MHR_CLAD_SMOKE_TEST.md` section A for the full derivation. clad-body itself installs and imports correctly (Python ≥3.12 required — confirmed via its `pyproject.toml`); its native MHR-mesh-loading step (via `pymomentum`) segfaulted in Task 02's test environment, most likely from a CUDA-vs-CPU-tagged PyTorch build mismatch specific to that environment's network policy — not a clad-body API or licensing problem. Still not benchmarked against real tape measurements.
+- Exact experiment needed: get the pymomentum/MHR native loader running in an environment with unrestricted PyPI/PyTorch-wheel-index access (or a GPU instance), then compare resulting measurements to a small set of people with known tape measurements.
 
 ### SMPL-Anthropometry (David Bojanić)
 - Repo: `github.com/DavidBoja/SMPL-Anthropometry`, MIT. Operates on SMPL or SMPL-X (betas+gender, or raw vertices).
@@ -124,6 +126,24 @@ in "Other candidates surveyed" and detailed in `CANDIDATE_MATRIX.md`.
 ### Known height as scale anchor (non-ML)
 - Not a model — the simplest available metric-scale solution: ask the customer for height (already commonly collected for MTM), use it to rescale a relative-shape mesh or 2D silhouette to real-world units.
 - Zero GPU cost, zero model-licensing risk, trivial to implement and to audit. Weakness: depends on honest self-report and can't correct for posture/camera-perspective distortion the way a genuine depth signal could — but as a first-pass anchor it is by far the lowest-risk option and should be the default before reaching for any depth-estimation model.
+
+## NVIDIA `video_to_data` (Isaac) — reference architecture, added Task 02
+
+`nvidia-isaac/video_to_data` is a robot-learning-data pipeline, not a
+body-measurement tool; one of its reconstruction modules
+(`v2d_sam3d_body`) wraps SAM 3D Body and adds a genuine **joint multi-view
+MHR optimization** (shared shape/scale across cameras, per-frame pose,
+robust multi-view reprojection loss). Code Apache-2.0, docs CC-BY-4.0
+(SAM 3D Body/MHR weights remain separately licensed/gated as above). It
+requires **pre-calibrated, synchronized multi-camera rigs** (chessboard
+calibration, frame-aligned streams) — there is no support, documented or
+otherwise, for casual sequential single-phone front/side/back capture.
+Its core joint-optimization *principle* is conceptually reusable for a
+guided-smartphone-capture Path C enhancement, but doing so would mean
+building our own calibration/pose front end from scratch — a real R&D
+project, not a configuration change. `RESEARCHED`, recorded as a reference
+architecture, not adopted. Full findings:
+`docs/experiments/TASK02_SAM3D_MHR_CLAD_SMOKE_TEST.md` section C.
 
 ## Other candidates surveyed (brief)
 
@@ -169,6 +189,19 @@ licensing does not imply proven accuracy, and the one independent
 anthropometric-fidelity study available found SAM 3D Body specifically
 struggles with atypical bodies, which is a direct concern for an MTM
 audience.
+
+**Update (Task 02):** the SAM3D→clad-body handoff, the one genuine
+integration-design uncertainty in this combination, is now resolved,
+implemented, and unit-tested (`experiments/sam3d_mhr_clad_smoke/`). What
+remains is not a design question but an execution-environment one: SAM 3D
+Body's checkpoint access is Hugging-Face-gated (blocking the image→params
+half) and clad-body's native MHR-mesh-loading step failed with a native
+crash in Task 02's sandbox, most likely from a PyTorch build mismatch that
+environment's network policy prevented fixing directly (blocking the
+params→measurements half). Neither blocker is architectural. Decision gate
+for this exact pipeline: `BLOCKED_BY_ACCESS` / `BLOCKED_BY_COMPUTE` /
+`BLOCKED_BY_INTEGRATION` — see `TASK02_SAM3D_MHR_CLAD_SMOKE_TEST.md` for
+the full breakdown and the next environment needed to clear it.
 
 The **most mature but licensing-encumbered** alternative combination is
 4D-Humans (SMPL) + SMPL-Anthropometry, both individually well-documented

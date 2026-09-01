@@ -12,7 +12,7 @@ a commercial license. Full detail and sources in
 
 | Candidate | Body model | Metric scale | Code license | Weight license | Commercial? | State | Key uncertainty |
 |---|---|---|---|---|---|---|---|
-| SAM 3D Body (Meta) | own MHR | UNKNOWN | SAM License (permissive) | SAM License | Yes | RESEARCHED | Anthropometric fidelity for atypical bodies (independent study found degradation) |
+| SAM 3D Body (Meta) | own MHR | Conditional on FOV estimator (MoGe2 default; falls back to a fixed default FOV, not photo-derived, if none supplied — confirmed from source, Task 02) | SAM License (permissive) | SAM License, checkpoint gated behind manual HF approval (confirmed, Task 02) | Yes (license); access blocked in Task 02's environment | RESEARCHED | Anthropometric fidelity for atypical bodies (independent study found degradation); still not run — checkpoint access blocked |
 | 4D-Humans / HMR2.0 | SMPL | UNKNOWN, likely relative | MIT | n/a (loads SMPL) | Blocked via SMPL dep. | RESEARCHED | Needs paid SMPL commercial license, cost unknown |
 | Multi-HMR (Naver) | SMPL-X | UNKNOWN | Custom non-commercial | Custom non-commercial | No | REJECTED (license) | — |
 | NLF (Neural Localizer Fields) | SMPL-compatible | Designed for metric | MIT | Non-commercial research only | No | REJECTED (license) | Otherwise most metric-scale-native design found |
@@ -36,7 +36,7 @@ a commercial license. Full detail and sources in
 
 | Candidate | Target mesh | MTM coverage | Real-tape validation | License | Commercial? | State | Key uncertainty |
 |---|---|---|---|---|---|---|---|
-| clad-body | Anny / MHR | Best of all (24/25 target measures incl. ISO 8559-1 set) | None found (self-referential only) | Apache-2.0 | Yes | RESEARCHED | Accuracy vs. real humans entirely unknown |
+| clad-body | Anny / MHR | 10/13 MTM measures covered (back length, front torso length, outseam confirmed as gaps, Task 02); best of all candidates surveyed | None found (self-referential only) | Apache-2.0 | Yes | RESEARCHED — installs and imports correctly (Task 02); SAM3D output adapter implemented and unit-tested; native MHR mesh-loading crashes in Task 02's sandbox (likely torch-build ABI issue, not a clad-body defect) | Accuracy vs. real humans entirely unknown; native MHR loader needs an environment with unrestricted PyPI/PyTorch-wheel access to actually execute |
 | SMPL-Anthropometry (Bojanić) | SMPL / SMPL-X | Good but missing sleeve/back/front-torso/outseam explicitly | None found (self-consistency only) | MIT (code); SMPL dep. non-commercial | Blocked via SMPL dep. | RESEARCHED | Same SMPL licensing question |
 | Landmarks2Anthropometry / pose-independent-anthropometry | SMPL-derived landmarks | 11 measures, partial | Trained/eval'd on CAESAR (restricted dataset; UNVERIFIED-PRIMARY detail) | No LICENSE file (all rights reserved) | No | REJECTED (license) | Contact author to clarify |
 | CALVIS | SMPL | Only chest/waist/pelvis | Synthetic-only (explicitly avoids CAESAR) | Unclear | Unverified | RESEARCHED | Too narrow for MTM list regardless |
@@ -65,3 +65,9 @@ a commercial license. Full detail and sources in
 | PIFu (relicensed) | Clothed-surface implicit function | MIT | Yes | RESEARCHED | No decoupled underlying-body output |
 | PIFuHD (Meta) | High-res clothed surface | CC-BY-NC 4.0 | No | REJECTED (license) | — |
 | ETCH / ETCH-X | Cloth-to-body displacement fitting | Code MIT, weights non-commercial, outputs SMPL/SMPL-X anyway | No | REJECTED (license) | Best technical treatment of loose clothing found; revisit if licensing changes |
+
+## Multi-view / reference architectures (added Task 02)
+
+| Candidate | Approach | License | Commercial? | State | Key uncertainty |
+|---|---|---|---|---|---|
+| NVIDIA `video_to_data` (`v2d_sam3d_body`) | Joint multi-view MHR optimization (shared shape/scale, per-frame pose, multi-view reprojection loss) inside a broader robot-learning-data pipeline | Apache-2.0 (code), CC-BY-4.0 (docs); SAM 3D Body/MHR weights separately licensed/gated | Yes (V2D's own code); depends on gated SAM 3D Body weights | RESEARCHED — reference architecture, not adopted | Requires pre-calibrated, synchronized multi-camera rigs; no support for casual sequential smartphone capture; reusing the joint-optimization principle for guided phone photos would need a from-scratch calibration/pose front end (real R&D, not configuration) |

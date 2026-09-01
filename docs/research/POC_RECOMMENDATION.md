@@ -5,6 +5,17 @@ proposes the concrete first experiment. It does not authorize building the
 full system — per the task brief, this phase is research + repo bootstrap
 only.
 
+**Task 02 update:** the pipeline recommended below was implemented as a
+smoke test (`experiments/sam3d_mhr_clad_smoke/`) and given a decision gate
+of **`BLOCKED_BY_ACCESS`** (SAM 3D Body checkpoint requires manual
+Hugging Face approval, not available in that task's environment),
+compounded by `BLOCKED_BY_COMPUTE` (no GPU present there) and
+`BLOCKED_BY_INTEGRATION` (clad-body's native MHR loader segfaulted, likely
+a fixable PyTorch-build ABI issue). None of these are licensing or design
+blockers — the one real design ambiguity (SAM3D↔clad-body field mapping)
+was resolved, implemented, and unit-tested in Task 02. Full detail:
+`docs/experiments/TASK02_SAM3D_MHR_CLAD_SMOKE_TEST.md`.
+
 ## 1. Is a useful no-training POC technically plausible?
 
 Yes, with caveats. A no-training pipeline can plausibly be assembled from
@@ -76,6 +87,14 @@ assumed free is any SMPL/SMPL-X commercial sub-license — that stays outside
 this budget line and requires separate, explicit approval with a quoted
 price before being pursued.
 
+**Task 02 grounded this estimate in live pricing** (not stale knowledge):
+RTX 4090-class instances run **~$0.29–$0.69/hr** on Vast.ai/RunPod as of
+~April 2026. A first real benchmark (environment setup, checkpoint
+download once HF access is approved, inference over ~10 images, clad-body
+measurement) would plausibly take 2–4 hours, i.e. **roughly $0.60–$2.80**
+— well under the task's preferred $10 ceiling for the first real
+benchmark. Nothing has been purchased or provisioned yet.
+
 ## 7. Which 2–3 candidate pipelines should actually be RUN next?
 
 1. **SAM 3D Body → clad-body (Path B core).** Highest priority: commercially
@@ -89,6 +108,18 @@ price before being pursued.
    method, it tells us whether Path B's SAM-3D-Body numbers are in the
    right ballpark, independent of the licensing question, which can be
    resolved separately before any production use.
+
+**Task 02 update — what actually needs to happen next to run #1:** two
+concrete, non-architectural blockers, both cleared by moving to a
+different environment rather than more design work: (a) request and obtain
+Hugging Face access approval for `facebook/sam-3d-body-dinov3` or
+`facebook/sam-3d-body-vith`, and (b) run in an environment with a GPU and
+unrestricted access to the PyTorch wheel index (`download.pytorch.org`),
+so `pymomentum-cpu` resolves against a matching torch build instead of the
+CUDA-tagged default that caused a native crash in Task 02's sandbox. The
+SAM3D→clad-body adapter code itself (`experiments/sam3d_mhr_clad_smoke/`)
+is already implemented and unit-tested and needs no further design work
+before that run.
 
 ## 8. What exact input data will be needed to compare them fairly?
 
