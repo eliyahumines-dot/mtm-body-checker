@@ -94,20 +94,39 @@ def run_sam3d_inference(image_path: str, checkpoint_path: str | None, warnings: 
         return f"error: {exc!r}", None
 
 
-def measure_via_subprocess(params_path: str, known_height_cm: float | None, warnings: list, failures: list):
+def measure_via_subprocess(
+    params_path: str,
+    known_height_cm: float | None,
+    warnings: list,
+    failures: list,
+    python_executable: str | None = None,
+):
     """Run clad-body's MHR loader + measure() in an isolated subprocess.
 
     See _mhr_measure_worker.py's docstring for why this is a subprocess and
     not an in-process call: the loader has been observed to segfault the
-    whole interpreter in this environment (native crash inside pymomentum's
-    FBX loader), and we do not want that to take down run.py itself.
+    whole interpreter (native crash inside pymomentum's FBX loader), and we
+    do not want that to take down run.py itself.
+
+    Args:
+        python_executable: which Python to run the worker under. Defaults
+            to ``sys.executable`` (Task 02's behavior, unchanged). Task 03
+            (Colab/GPU) evidence showed clad-body's `pymomentum-cpu`
+            dependency needs a torch build ABI-matched to a CPU-only
+            install, which conflicts with the CUDA-enabled torch build the
+            main SAM 3D Body inference process needs -- so on a real GPU
+            environment, pass the python executable of a *separate*,
+            CPU-torch venv here instead of leaving this as the default. See
+            docs/experiments/TASK03_COLAB_END_TO_END_SMOKE_TEST.md.
     """
-    if not _package_available("clad_body"):
+    if not _package_available("clad_body") and python_executable is None:
         return "blocked_no_clad_body: `clad_body` is not installed in this environment", None
+
+    python_bin = python_executable or sys.executable
 
     with tempfile.TemporaryDirectory() as td:
         output_path = os.path.join(td, "result.json")
-        cmd = [sys.executable, str(HERE / "_mhr_measure_worker.py"), params_path, output_path]
+        cmd = [python_bin, str(HERE / "_mhr_measure_worker.py"), params_path, output_path]
         if known_height_cm is not None:
             cmd.append(str(known_height_cm))
 
@@ -145,6 +164,14 @@ def main() -> int:
         help="Path to an existing SAM3D-style MHR params JSON (skips SAM 3D Body inference)",
     )
     parser.add_argument("--known-height-cm", type=float, default=None, help="Optional known customer height in cm")
+    parser.add_argument(
+        "--clad-python-executable",
+        default=None,
+        help=(
+            "Python executable to run the clad-body/pymomentum measurement worker under "
+            "(e.g. a separate CPU-torch venv). Defaults to this process's own interpreter."
+        ),
+    )
     parser.add_argument("--subject-id", default=None, help="Optional identifier for this subject/run")
     parser.add_argument("--output", required=True, help="Path to write the machine-readable JSON result")
     args = parser.parse_args()
@@ -219,7 +246,10 @@ def main() -> int:
 
     if params_path and result["mhr_params_available"]:
         t1 = time.time()
-        m_status, m_result = measure_via_subprocess(params_path, args.known_height_cm, warnings, failures)
+        m_status, m_result = measure_via_subprocess(
+            params_path, args.known_height_cm, warnings, failures,
+            python_executable=args.clad_python_executable,
+        )
         runtime["measurement_extraction"] = round(time.time() - t1, 3)
         result["measurement_extraction_status"] = m_status
         if m_result is not None:

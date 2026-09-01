@@ -7,8 +7,12 @@ image -> SAM 3D Body -> MHR params -> clad-body -> anthropometric measurements
 ```
 
 This is an installability/interoperability/numerical-sanity test, not an
-accuracy benchmark. Full findings:
-`docs/experiments/TASK02_SAM3D_MHR_CLAD_SMOKE_TEST.md`.
+accuracy benchmark. Findings from running the CLI-only path (no GPU, no
+checkpoint access): `docs/experiments/TASK02_SAM3D_MHR_CLAD_SMOKE_TEST.md`.
+Findings from the real-GPU/real-checkpoint Colab path:
+`docs/experiments/TASK03_COLAB_END_TO_END_SMOKE_TEST.md` and
+`notebooks/TASK03_SAM3D_MHR_CLAD_COLAB.ipynb` (that notebook reuses every
+module in this directory — see below).
 
 ## What's here
 
@@ -24,12 +28,24 @@ accuracy benchmark. Full findings:
   tailoring terminology, with explicit per-measurement notes on where the
   definitions are known (or suspected, or unverified) to diverge.
 - `_mhr_measure_worker.py` — runs clad-body's MHR load + measure in an
-  isolated subprocess, so a native crash there (observed in this task's
-  environment, see the findings doc) doesn't take down `run.py`.
+  isolated subprocess, so a native crash there (observed in Task 02's
+  environment) doesn't take down `run.py`. Can be pointed at a *different*
+  Python interpreter (see `run.py`'s `--clad-python-executable`), so it can
+  run against a separately-configured venv (e.g. a CPU-torch venv matching
+  `pymomentum-cpu`'s expected ABI, as Task 03's Colab notebook does)
+  instead of always sharing the caller's own interpreter. Prints a
+  `STAGE=<name>` marker to stderr before each of its two failure-prone
+  calls, so a crash's stderr tail says which one failed
+  (`parse_last_stage()`).
+- `decision_gate.py` — deterministic classification of a pipeline run into
+  one of Task 03's six decision-gate letters (A–F) from a
+  `PipelineState` record of what happened at each stage, plus the eleven
+  named failure categories. Pure logic, no heavy dependency; reused
+  identically by the Colab notebook's final cell.
 - `run.py` — the CLI entry point.
-- `tests/` — tests for the four files above only. No test touches SAM 3D
-  Body or clad-body internals directly, and all tests run under a plain
-  Python install with just `pytest`+`numpy` (no torch, no clad-body, no
+- `tests/` — tests for the files above only. No test touches SAM 3D Body
+  or clad-body internals directly, and all tests run under a plain Python
+  install with just `pytest`+`numpy` (no torch, no clad-body, no
   checkpoint download required).
 
 ## Running the tests

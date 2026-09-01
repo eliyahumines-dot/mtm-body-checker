@@ -16,6 +16,14 @@ Writes a JSON result to <output_json_path> on success. On failure, prints
 to stderr and exits non-zero (or the OS kills it with a signal, e.g. -11
 for SIGSEGV, which the parent process's subprocess.run() reports as a
 negative returncode).
+
+Task 03 addition: prints a "STAGE=<name>" marker to stderr immediately
+before each of the two upstream calls that can fail (mesh load vs.
+measurement), so a caller parsing stderr can distinguish
+MHR_RECONSTRUCTION_FAILURE from CLAD_BODY_FAILURE (Task 03 section 14)
+instead of lumping both under one generic error, as Task 02's version did.
+This is the smallest change that makes the distinction observable -- it
+does not change success-path behavior or output format at all.
 """
 
 from __future__ import annotations
@@ -26,6 +34,23 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
 from rescale import compute_mesh_height_cm, uniform_rescale_to_height  # noqa: E402
+
+
+def parse_last_stage(stderr_text: str) -> str | None:
+    """Return the name from the last "STAGE=<name>" marker line found in
+    ``stderr_text``, or None if no marker is present.
+
+    Used by a caller (run.py, or the Colab notebook) to tell
+    MHR_RECONSTRUCTION_FAILURE apart from CLAD_BODY_FAILURE when the worker
+    dies (including via a native crash / signal) partway through: the last
+    stage whose marker was printed before death is the one that failed.
+    """
+    stage = None
+    for line in (stderr_text or "").splitlines():
+        line = line.strip()
+        if line.startswith("STAGE="):
+            stage = line[len("STAGE="):]
+    return stage
 
 
 def main() -> int:
@@ -40,6 +65,7 @@ def main() -> int:
     from clad_body.load import load_mhr_from_params
     from clad_body.measure import measure
 
+    print("STAGE=mhr_reconstruction", file=sys.stderr, flush=True)
     body = load_mhr_from_params(params_path)
 
     import numpy as np
@@ -48,11 +74,13 @@ def main() -> int:
 
     rescale_factor = None
     if known_height_cm is not None:
+        print("STAGE=rescale", file=sys.stderr, flush=True)
         rescaled_verts, rescale_factor = uniform_rescale_to_height(
             np.asarray(body.mesh.vertices), known_height_cm
         )
         body.mesh.vertices = rescaled_verts
 
+    print("STAGE=clad_body_measure", file=sys.stderr, flush=True)
     measurements = measure(body)
 
     result = {
