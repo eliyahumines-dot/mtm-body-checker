@@ -1,0 +1,47 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Node (in case tooling/scripts use it)
+node_modules/
+
+# Model weights / checkpoints
+*.pth
+*.pt
+*.ckpt
+*.safetensors
+*.onnx
+*.h5
+*.npz
+weights/
+checkpoints/
+
+# Datasets / large media
+data/
+datasets/
+*.zip
+*.tar
+*.tar.gz
+*.mp4
+*.mov
+
+# Vendored / external repos inspected during research
+third_party/
+external/
+vendor/
+
+# OS / editor
+.DS_Store
+.idea/
+.vscode/
+
+# Env
+.env
+.env.*
