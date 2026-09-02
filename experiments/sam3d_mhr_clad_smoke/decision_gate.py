@@ -63,11 +63,12 @@ class PipelineState:
     gpu_available: bool = False
     hf_auth_ok: bool | None = None
     checkpoint_downloaded: bool | None = None
-    dependencies_installed: bool | None = None
+    dependencies_installed: bool | None = None  # Task 03B: Environment A (SAM 3D Body) build, specifically
     sam3d_inference_ok: bool | None = None
     mhr_schema_valid: bool | None = None
-    mhr_reconstruction_ok: bool | None = None
-    clad_body_measure_ok: bool | None = None
+    mhr_clad_environment_ok: bool | None = None  # Task 03B: Environment B build + bundled-fixture self-test
+    mhr_reconstruction_ok: bool | None = None  # Task 03B: real interchange-derived data, not the self-test
+    clad_body_measure_ok: bool | None = None  # Task 03B: real interchange-derived data, not the self-test
     measurements: dict | None = None
     failure_categories: list[str] = field(default_factory=list)
 
@@ -163,3 +164,42 @@ def classify(state: PipelineState) -> tuple[DecisionGate, str]:
         "earlier, more specific gate -- treated conservatively rather than "
         "assumed successful.",
     )
+
+
+def _phase_status(value: bool | None) -> str:
+    if value is None:
+        return "NOT_ATTEMPTED"
+    return "PASS" if value else "FAIL"
+
+
+def phase_summary(state: PipelineState) -> dict:
+    """Task 03B section 11: report the five phases independently
+    (SAM3D_ENVIRONMENT, SAM3D_INFERENCE, MHR_CLAD_ENVIRONMENT,
+    MHR_CLAD_EXTRACTION, END_TO_END), each as PASS / FAIL / NOT_ATTEMPTED,
+    plus the first exact failing boundary -- deliberately not collapsed
+    into a single letter grade the way :func:`classify` is, since Task 03B
+    asks for these to be visible separately.
+
+    Does not replace :func:`classify`; both read the same
+    :class:`PipelineState` and are safe to call together.
+    """
+    fields = {
+        "SAM3D_ENVIRONMENT": _phase_status(state.dependencies_installed),
+        "SAM3D_INFERENCE": _phase_status(state.sam3d_inference_ok),
+        "MHR_CLAD_ENVIRONMENT": _phase_status(state.mhr_clad_environment_ok),
+        "MHR_CLAD_EXTRACTION": _phase_status(state.clad_body_measure_ok),
+    }
+
+    end_to_end = (
+        fields["SAM3D_ENVIRONMENT"] == "PASS"
+        and fields["SAM3D_INFERENCE"] == "PASS"
+        and fields["MHR_CLAD_ENVIRONMENT"] == "PASS"
+        and fields["MHR_CLAD_EXTRACTION"] == "PASS"
+        and bool(state.measurements)
+    )
+    fields["END_TO_END"] = "PASS" if end_to_end else "FAIL"
+
+    ordered_phases = ["SAM3D_ENVIRONMENT", "SAM3D_INFERENCE", "MHR_CLAD_ENVIRONMENT", "MHR_CLAD_EXTRACTION"]
+    fields["first_failing_boundary"] = next((p for p in ordered_phases if fields[p] == "FAIL"), None)
+
+    return fields
