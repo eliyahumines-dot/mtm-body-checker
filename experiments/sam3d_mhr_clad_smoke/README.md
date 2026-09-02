@@ -9,11 +9,13 @@ image -> SAM 3D Body -> MHR params -> clad-body -> anthropometric measurements
 This is an installability/interoperability/numerical-sanity test, not an
 accuracy benchmark. Findings from running the CLI-only path (no GPU, no
 checkpoint access): `docs/experiments/TASK02_SAM3D_MHR_CLAD_SMOKE_TEST.md`.
-Findings from the real-GPU/real-checkpoint Colab path (Task 03) and the
-resulting dependency-architecture fix (Task 03B, two fully isolated
-environments exchanging one small interchange file):
+Findings from three rounds of the real-GPU/real-checkpoint Colab path —
+Task 03 (first attempt), Task 03B (dual-environment fix, still failed on
+real Colab), Task 03C (minimal core inference, no Detectron2, fixed
+`chump`/`chumpy`, deterministic torch pin):
 `docs/experiments/TASK03_COLAB_END_TO_END_SMOKE_TEST.md`,
-`docs/experiments/TASK03B_DEPENDENCY_RESOLUTION.md`, and
+`docs/experiments/TASK03B_DEPENDENCY_RESOLUTION.md`,
+`docs/experiments/TASK03C_MINIMAL_CORE_INFERENCE.md`, and
 `notebooks/TASK03_SAM3D_MHR_CLAD_COLAB.ipynb` (that notebook reuses every
 module in this directory — see below).
 
@@ -42,13 +44,27 @@ module in this directory — see below).
   (`parse_last_stage()`).
 - `decision_gate.py` — deterministic classification of a pipeline run into
   one of Task 03's six decision-gate letters (A–F) from a
-  `PipelineState` record of what happened at each stage, plus the eleven
-  named failure categories. `phase_summary()` (Task 03B) additionally
-  reports five independent PASS/FAIL/NOT_ATTEMPTED phase fields
-  (`SAM3D_ENVIRONMENT`, `SAM3D_INFERENCE`, `MHR_CLAD_ENVIRONMENT`,
-  `MHR_CLAD_EXTRACTION`, `END_TO_END`) plus the first failing boundary.
+  `PipelineState` record of what happened at each stage, plus 17 named
+  failure categories (11 original + 6 added in Task 03C for precise Phase
+  A diagnostics). `phase_summary()` reports eight independent
+  PASS/FAIL/NOT_ATTEMPTED phase fields — four for Phase A
+  (`SAM3D_CORE_ENVIRONMENT`, `SAM3D_MODEL_LOAD`, `SAM3D_CORE_INFERENCE`,
+  `MHR_PARAMS_SERIALIZED`, Task 03C), two for Phase B
+  (`MHR_CLAD_ENVIRONMENT`, `MHR_CLAD_EXTRACTION`), plus
+  `PHASE_A_SUCCESSFUL` and `END_TO_END` — and the first failing boundary.
   Pure logic, no heavy dependency; reused identically by the Colab
   notebook's final cell.
+- `sam3d_env_spec.py` (Task 03C) — single source of truth for Environment
+  A's minimal dependency list and pinned torch/torchvision versions,
+  imported directly by the notebook (so what it actually installs and
+  what the tests check can never drift apart). Documents and guards the
+  `chump`-vs-`chumpy` finding — the real Task 03B build failure was this
+  agent's own transcription mistake, not an upstream change.
+- `install_log.py` (Task 03C) — structured failure logging for every
+  install command the notebook runs (exact command, return code, stderr
+  tail, failure category). Fixes a real bug: Task 03B's notebook printed
+  "Recorded failure categories: none" despite two observed build
+  failures, because most failure paths only ever flipped a boolean.
 - `interchange.py` (Task 03B) — the versioned `.npz` file contract between
   Environment A (SAM 3D Body GPU inference) and Environment B (MHR +
   clad-body measurement extraction), which run as two fully isolated
@@ -56,11 +72,15 @@ module in this directory — see below).
   only, no pickle, loadable from either side regardless of which torch
   build is installed there. Builds on `adapter.py`'s validation, so it
   inherits the same `scale_params` exclusion guarantee.
-- `_sam3d_inference_worker.py` (Task 03B) — Environment A's subprocess
-  entry point: runs real SAM 3D Body inference and writes the interchange
-  file. Mirrors `_mhr_measure_worker.py`'s pattern (always writes a JSON
-  telemetry/status report, never lets a crash propagate as an opaque
-  return code).
+- `_sam3d_inference_worker.py` (Task 03B, revised Task 03C) — Environment
+  A's subprocess entry point: loads the model, builds and validates an
+  explicit full-image bounding box (no learned detector — see Task 03C's
+  doc for why `human_detector=None` is upstream's own first-class path,
+  not a workaround), runs inference, and writes the interchange file.
+  Reports model-load/inference/serialize as three separately-observable
+  telemetry fields. Mirrors `_mhr_measure_worker.py`'s pattern (always
+  writes a JSON telemetry/status report, never lets a crash propagate as
+  an opaque return code).
 - `run.py` — the CLI entry point.
 - `tests/` — tests for the files above only. No test touches SAM 3D Body
   or clad-body internals directly, and all tests run under a plain Python
