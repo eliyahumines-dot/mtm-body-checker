@@ -135,7 +135,7 @@ def test_add_failure_is_idempotent():
 
 def test_all_failure_categories_are_distinct_strings():
     values = [c.value for c in FailureCategory]
-    assert len(values) == len(set(values)) == 18  # 11 original + 6 Task 03C + 1 Task 03D
+    assert len(values) == len(set(values)) == 19  # 11 original + 6 Task 03C + 1 Task 03D + 1 Task 03E
 
 
 def test_task_03d_failure_category_is_present():
@@ -233,6 +233,95 @@ def test_source_import_and_model_load_failures_are_distinguishable_categories():
     assert FailureCategory.SAM3D_MODEL_LOAD_FAILURE.value not in state_a.failure_categories
 
 
+# --- Task 03E: SAM3D_MODEL_CODE_IMPORT_FAILURE, distinct from both
+# SAM3D_SOURCE_IMPORT_FAILURE and SAM3D_MODEL_LOAD_FAILURE ---
+
+def test_task_03e_failure_category_is_present():
+    names = {c.name for c in FailureCategory}
+    assert "SAM3D_MODEL_CODE_IMPORT_FAILURE" in names
+
+
+def test_model_code_import_failure_is_dependency_environment_blocked():
+    """The bare `sam_3d_body` package imports fine, but importing its
+    model-construction submodules fails -- must never fall through to
+    SAM3D_MODEL_LOAD_FAILURE territory, since load_sam_3d_body() itself
+    never got the chance to even be imported."""
+    state = PipelineState(
+        gpu_available=True, hf_auth_ok=True, checkpoint_downloaded=True,
+        dependencies_installed=True, sam3d_source_import_ok=True,
+        sam3d_model_code_import_ok=False,
+    )
+    state.add_failure(FailureCategory.SAM3D_MODEL_CODE_IMPORT_FAILURE)
+    gate, reason = classify(state)
+    assert gate == DecisionGate.DEPENDENCY_ENVIRONMENT_BLOCKED
+    assert "model-construction code" in reason
+
+
+def test_model_code_import_failure_takes_precedence_over_unset_model_load():
+    state = PipelineState(
+        gpu_available=True, dependencies_installed=True, sam3d_source_import_ok=True,
+        sam3d_model_code_import_ok=False,
+    )
+    gate, _ = classify(state)
+    assert gate == DecisionGate.DEPENDENCY_ENVIRONMENT_BLOCKED
+
+
+def test_model_code_import_success_does_not_block_later_model_load_failure():
+    state = PipelineState(
+        gpu_available=True, dependencies_installed=True, sam3d_source_import_ok=True,
+        sam3d_model_code_import_ok=True, sam3d_model_load_ok=False,
+    )
+    gate, reason = classify(state)
+    assert gate == DecisionGate.DEPENDENCY_ENVIRONMENT_BLOCKED
+    assert "load_sam_3d_body" in reason
+
+
+def test_source_import_model_code_import_and_model_load_failures_are_distinguishable():
+    """The three failure categories must never be conflated."""
+    state_a = PipelineState(sam3d_source_import_ok=False)
+    state_a.add_failure(FailureCategory.SAM3D_SOURCE_IMPORT_FAILURE)
+    state_b = PipelineState(sam3d_source_import_ok=True, sam3d_model_code_import_ok=False)
+    state_b.add_failure(FailureCategory.SAM3D_MODEL_CODE_IMPORT_FAILURE)
+    state_c = PipelineState(
+        sam3d_source_import_ok=True, sam3d_model_code_import_ok=True, sam3d_model_load_ok=False,
+    )
+    state_c.add_failure(FailureCategory.SAM3D_MODEL_LOAD_FAILURE)
+    all_categories = [state_a.failure_categories, state_b.failure_categories, state_c.failure_categories]
+    for i, cats_i in enumerate(all_categories):
+        for j, cats_j in enumerate(all_categories):
+            if i != j:
+                assert not set(cats_i) & set(cats_j)
+
+
+def test_phase_summary_matches_task03e_model_code_import_boundary():
+    """Reproduces a hypothetical (but structurally identical to the real
+    Task 03D Colab report) scenario: source import passes, but the
+    model-construction submodules fail to import -- must be distinguishable
+    from both SAM3D_SOURCE_IMPORT and SAM3D_MODEL_LOAD."""
+    state = PipelineState(
+        gpu_available=True, hf_auth_ok=True, checkpoint_downloaded=True,
+        dependencies_installed=True, sam3d_source_import_ok=True,
+        sam3d_model_code_import_ok=False,
+    )
+    fields = phase_summary(state)
+    assert fields["SAM3D_CORE_ENVIRONMENT"] == "PASS"
+    assert fields["SAM3D_SOURCE_IMPORT"] == "PASS"
+    assert fields["SAM3D_MODEL_CODE_IMPORT"] == "FAIL"
+    assert fields["SAM3D_MODEL_LOAD"] == "NOT_ATTEMPTED"
+    assert fields["first_failing_boundary"] == "SAM3D_MODEL_CODE_IMPORT"
+
+
+def test_phase_summary_source_import_failure_leaves_model_code_import_not_attempted():
+    state = PipelineState(
+        gpu_available=True, dependencies_installed=True, sam3d_source_import_ok=False,
+    )
+    fields = phase_summary(state)
+    assert fields["SAM3D_SOURCE_IMPORT"] == "FAIL"
+    assert fields["SAM3D_MODEL_CODE_IMPORT"] == "NOT_ATTEMPTED"
+    assert fields["SAM3D_MODEL_LOAD"] == "NOT_ATTEMPTED"
+    assert fields["first_failing_boundary"] == "SAM3D_SOURCE_IMPORT"
+
+
 def test_all_decision_gates_are_distinct_single_letters():
     values = [g.value for g in DecisionGate]
     assert values == ["A", "B", "C", "D", "E", "F"]
@@ -299,7 +388,8 @@ def test_phase_summary_first_failing_boundary_is_earliest_not_first_recorded():
 def test_phase_summary_full_success_is_end_to_end_pass():
     state = PipelineState(
         gpu_available=True, hf_auth_ok=True, checkpoint_downloaded=True,
-        dependencies_installed=True, sam3d_source_import_ok=True, sam3d_model_load_ok=True,
+        dependencies_installed=True, sam3d_source_import_ok=True,
+        sam3d_model_code_import_ok=True, sam3d_model_load_ok=True,
         sam3d_inference_ok=True, mhr_schema_valid=True, mhr_clad_environment_ok=True,
         mhr_reconstruction_ok=True, clad_body_measure_ok=True, measurements={"height_cm": 170.0},
     )
@@ -312,7 +402,8 @@ def test_phase_summary_full_success_is_end_to_end_pass():
 def test_phase_summary_end_to_end_fails_if_measurements_empty_despite_flags_true():
     state = PipelineState(
         gpu_available=True, dependencies_installed=True, sam3d_source_import_ok=True,
-        sam3d_model_load_ok=True, sam3d_inference_ok=True, mhr_schema_valid=True,
+        sam3d_model_code_import_ok=True, sam3d_model_load_ok=True,
+        sam3d_inference_ok=True, mhr_schema_valid=True,
         mhr_clad_environment_ok=True, clad_body_measure_ok=True, measurements=None,
     )
     fields = phase_summary(state)
@@ -320,11 +411,11 @@ def test_phase_summary_end_to_end_fails_if_measurements_empty_despite_flags_true
     assert fields["END_TO_END"] == "FAIL"  # but no real measurements exist
 
 
-def test_phase_summary_returns_exactly_ten_keys():
+def test_phase_summary_returns_exactly_eleven_keys():
     fields = phase_summary(PipelineState())
     assert set(fields.keys()) == {
-        "SAM3D_CORE_ENVIRONMENT", "SAM3D_SOURCE_IMPORT", "SAM3D_MODEL_LOAD",
-        "SAM3D_CORE_INFERENCE", "MHR_PARAMS_SERIALIZED", "MHR_CLAD_ENVIRONMENT",
+        "SAM3D_CORE_ENVIRONMENT", "SAM3D_SOURCE_IMPORT", "SAM3D_MODEL_CODE_IMPORT",
+        "SAM3D_MODEL_LOAD", "SAM3D_CORE_INFERENCE", "MHR_PARAMS_SERIALIZED", "MHR_CLAD_ENVIRONMENT",
         "MHR_CLAD_EXTRACTION", "PHASE_A_SUCCESSFUL", "END_TO_END", "first_failing_boundary",
     }
 

@@ -9,16 +9,24 @@ image -> SAM 3D Body -> MHR params -> clad-body -> anthropometric measurements
 This is an installability/interoperability/numerical-sanity test, not an
 accuracy benchmark. Findings from running the CLI-only path (no GPU, no
 checkpoint access): `docs/experiments/TASK02_SAM3D_MHR_CLAD_SMOKE_TEST.md`.
-Findings from four rounds of the real-GPU/real-checkpoint Colab path —
+Findings from five rounds of the real-GPU/real-checkpoint Colab path —
 Task 03 (first attempt), Task 03B (dual-environment fix, still failed on
 real Colab), Task 03C (minimal core inference, no Detectron2, fixed
 `chump`/`chumpy`, deterministic torch pin — got Environment A building for
 the first time), Task 03D (fixed the `sam_3d_body` import path once
-Environment A itself was confirmed working):
+Environment A itself was confirmed working), Task 03E (the same
+`ModuleNotFoundError: No module named 'sam_3d_body'` recurred on a second
+real Colab run because Task 03D's fix partly relied on subprocess
+`env=PYTHONPATH`; Task 03E removes that reliance everywhere in favor of a
+standalone script that does its own `sys.path.insert()` from an explicit
+CLI argument, verified against a real, non-mocked upstream clone, and adds
+a further `SAM3D_MODEL_CODE_IMPORT` boundary distinct from both source
+import and checkpoint loading):
 `docs/experiments/TASK03_COLAB_END_TO_END_SMOKE_TEST.md`,
 `docs/experiments/TASK03B_DEPENDENCY_RESOLUTION.md`,
 `docs/experiments/TASK03C_MINIMAL_CORE_INFERENCE.md`,
-`docs/experiments/TASK03D_SAM3D_IMPORT_PATH_FIX.md`, and
+`docs/experiments/TASK03D_SAM3D_IMPORT_PATH_FIX.md`,
+`docs/experiments/TASK03E_SAM3D_SOURCE_IMPORT_HARDENING.md`, and
 `notebooks/TASK03_SAM3D_MHR_CLAD_COLAB.ipynb` (that notebook reuses every
 module in this directory — see below).
 
@@ -47,13 +55,14 @@ module in this directory — see below).
   (`parse_last_stage()`).
 - `decision_gate.py` — deterministic classification of a pipeline run into
   one of Task 03's six decision-gate letters (A–F) from a
-  `PipelineState` record of what happened at each stage, plus 18 named
-  failure categories (11 original + 6 added in Task 03C + 1 in Task 03D
-  for precise Phase A diagnostics). `phase_summary()` reports ten
-  independent PASS/FAIL/NOT_ATTEMPTED phase fields — five for Phase A
+  `PipelineState` record of what happened at each stage, plus 19 named
+  failure categories (11 original + 6 added in Task 03C + 1 in Task 03D +
+  1 in Task 03E for precise Phase A diagnostics). `phase_summary()` reports
+  eleven independent PASS/FAIL/NOT_ATTEMPTED phase fields — six for Phase A
   (`SAM3D_CORE_ENVIRONMENT`, `SAM3D_SOURCE_IMPORT` (Task 03D),
-  `SAM3D_MODEL_LOAD`, `SAM3D_CORE_INFERENCE`, `MHR_PARAMS_SERIALIZED`),
-  two for Phase B (`MHR_CLAD_ENVIRONMENT`, `MHR_CLAD_EXTRACTION`), plus
+  `SAM3D_MODEL_CODE_IMPORT` (Task 03E), `SAM3D_MODEL_LOAD`,
+  `SAM3D_CORE_INFERENCE`, `MHR_PARAMS_SERIALIZED`), two for Phase B
+  (`MHR_CLAD_ENVIRONMENT`, `MHR_CLAD_EXTRACTION`), plus
   `PHASE_A_SUCCESSFUL` and `END_TO_END` — and the first failing boundary.
   Pure logic, no heavy dependency; reused identically by the Colab
   notebook's final cell.
@@ -72,6 +81,22 @@ module in this directory — see below).
   Colab hardware — Environment A itself was confirmed fully working
   (torch/CUDA/GPU/pin all PASS) but nothing pointed the worker
   interpreter at the cloned repo.
+- `_sam3d_source_import_check.py` (Task 03E) — standalone pre-flight
+  script, independently runnable and independently testable: takes
+  `sam3d_source_root` as an explicit CLI argument and does its own
+  `sys.path.insert()` internally, with **no** subprocess `env=PYTHONPATH`
+  reliance at all. Replaces Task 03D's notebook-inline `-c` preflight,
+  which set `env=PYTHONPATH` — a second real Colab run showed that
+  mechanism was not actually sufficient (the identical
+  `ModuleNotFoundError` recurred), for a reason this project's own sandbox
+  cannot reproduce or observe directly. Reports `SAM3D_SOURCE_IMPORT` and
+  a further `SAM3D_MODEL_CODE_IMPORT` boundary (SAM 3D Body's own
+  `build_models`/`sam_3d_body_estimator` submodules importing cleanly,
+  distinct from `SAM3D_MODEL_LOAD` needing real checkpoint assets) as two
+  independently-observable PASS/FAIL results, printed before any
+  checkpoint download is attempted. Verified in this task against a real,
+  non-mocked clone of `facebookresearch/sam-3d-body`, not only synthetic
+  fixtures.
 - `install_log.py` (Task 03C) — structured failure logging for every
   install command the notebook runs (exact command, return code, stderr
   tail, failure category). Fixes a real bug: Task 03B's notebook printed
@@ -84,18 +109,23 @@ module in this directory — see below).
   only, no pickle, loadable from either side regardless of which torch
   build is installed there. Builds on `adapter.py`'s validation, so it
   inherits the same `scale_params` exclusion guarantee.
-- `_sam3d_inference_worker.py` (Task 03B, revised Task 03C/03D) —
+- `_sam3d_inference_worker.py` (Task 03B, revised Task 03C/03D/03E) —
   Environment A's subprocess entry point: takes a validated
-  `sam3d_source_root` and performs a pre-flight `import sam_3d_body`
-  check (Task 03D, classified separately from a model-load failure — see
-  its docstring for the A-vs-B distinction), loads the model, builds and
-  validates an explicit full-image bounding box (no learned detector —
-  see Task 03C's doc for why `human_detector=None` is upstream's own
-  first-class path, not a workaround), runs inference, and writes the
-  interchange file. Reports source-import/model-load/inference/serialize
-  as four separately-observable telemetry fields. Mirrors
-  `_mhr_measure_worker.py`'s pattern (always writes a JSON
-  telemetry/status report, never lets a crash propagate as an opaque
+  `sam3d_source_root` and performs a two-stage pre-flight import check —
+  `SAM3D_SOURCE_IMPORT` (bare `import sam_3d_body`) then
+  `SAM3D_MODEL_CODE_IMPORT` (Task 03E: `build_models`/
+  `sam_3d_body_estimator` submodule imports, split out as its own boundary,
+  distinct from a model-load failure — see the module docstring), loads the
+  model, builds and validates an explicit full-image bounding box (no
+  learned detector — see Task 03C's doc for why `human_detector=None` is
+  upstream's own first-class path, not a workaround), runs inference, and
+  writes the interchange file. Reports each stage as an independently
+  observable telemetry field, defaulting to `None` ("not attempted"), never
+  `False` (Task 03E: fixes a real cascading-false-failure bug where a
+  `False` default plus `bool()` coercion in the notebook made every
+  downstream stage after an early failure misreport as FAIL instead of
+  NOT_ATTEMPTED). Mirrors `_mhr_measure_worker.py`'s pattern (always writes
+  a JSON telemetry/status report, never lets a crash propagate as an opaque
   return code).
 - `run.py` — the CLI entry point.
 - `tests/` — tests for the files above only. No test touches SAM 3D Body
