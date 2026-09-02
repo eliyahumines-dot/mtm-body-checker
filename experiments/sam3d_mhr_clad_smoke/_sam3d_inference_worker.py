@@ -1,10 +1,11 @@
 """Environment A worker: run real, minimal-core SAM 3D Body inference and
-write the interchange file (Task 03B, revised Task 03C/03D/03E).
+write the interchange file (Task 03B, revised Task 03C/03D/03E/03F).
 
 Invoked as a subprocess using Environment A's own dedicated venv Python --
 see notebooks/TASK03_SAM3D_MHR_CLAD_COLAB.ipynb (PHASE A0-A5) and
 docs/experiments/TASK03D_SAM3D_IMPORT_PATH_FIX.md,
-docs/experiments/TASK03E_SAM3D_SOURCE_IMPORT_HARDENING.md.
+docs/experiments/TASK03E_SAM3D_SOURCE_IMPORT_HARDENING.md,
+docs/experiments/TASK03F_MATPLOTLIB_BACKEND_FIX.md.
 
 Task 03D fix: a real Colab run with a fully working Environment A (torch/
 CUDA/GPU/pin all verified) still failed with `ModuleNotFoundError: No
@@ -50,6 +51,34 @@ default, combined with `bool(telemetry.get(...))` coercion in the notebook,
 silently turned "this stage never ran because an earlier one failed" into
 a reported FAIL rather than NOT_ATTEMPTED for every downstream stage.
 
+Task 03F fix: a *subsequent* real Colab run got past source-root resolution
+entirely (Task 03E's fix was correct) and then failed *inside*
+`import sam_3d_body` itself: `ValueError: Key backend:
+'module://matplotlib_inline.backend_inline' is not a valid value for
+backend`. Reproduced directly in this task against a real clone and a real
+dependency-complete venv: Colab's interactive kernel sets `MPLBACKEND` to
+its own inline-plotting backend; a standalone (non-notebook) subprocess
+inherits that same environment variable by default; something SAM 3D Body
+imports transitively (in this task's reproduction: `torchmetrics`, via
+`pytorch_lightning`) imports `matplotlib` as a side effect, which then
+fails to activate the inherited, notebook-only backend name. Fixed via
+`sam3d_matplotlib_guard.force_headless_matplotlib_backend()`, called at the
+very top of this module -- before anything that could import matplotlib --
+which forces `MPLBACKEND=Agg` unconditionally (never `setdefault()`: the
+invalid inherited value already exists and must be overridden, not
+preserved).
+
+Task 03F also splits what was previously folded into `SAM3D_SOURCE_IMPORT`
+(source-root validation failing) into its own, earlier stage,
+`source_root_validation` -- source-root validation and module *execution*
+are distinct (a root can be perfectly valid and still fail to import for
+unrelated runtime reasons, the Matplotlib case above being the concrete
+example), and import failures are now classified via
+`sam3d_matplotlib_guard.classify_import_exception()` into
+`SAM3D_MATPLOTLIB_BACKEND_FAILURE` or the more general
+`SAM3D_IMPORT_RUNTIME_DEPENDENCY_FAILURE` rather than always being
+described as a source-root/path problem.
+
 Task 03C deliberately removes every optional component from the actual
 inference call: no human_detector (no Detectron2/ViTDet), no
 human_segmentor (no SAM2/SAM3), no fov_estimator (no MoGe).
@@ -74,11 +103,13 @@ Reports each Phase A boundary independently via
 `telemetry["stage"]`/`telemetry["status"]`, so a failure at any one stage
 can be told apart from the others:
 
-    SAM3D_SOURCE_IMPORT     -- `import sam_3d_body` resolves under the given root (Task 03D)
-    SAM3D_MODEL_CODE_IMPORT -- build_models/sam_3d_body_estimator/data.utils.io import (Task 03E)
-    SAM3D_MODEL_LOAD        -- load_sam_3d_body() succeeds
-    SAM3D_CORE_INFERENCE    -- process_one_image() succeeds, person found
-    MHR_PARAMS_SERIALIZED   -- write_interchange() succeeds
+    SAM3D_SOURCE_ROOT_VALIDATION -- given root exists, has sam_3d_body/__init__.py (Task 03F)
+    SAM3D_SOURCE_IMPORT          -- `import sam_3d_body` actually executes and resolves under
+                                     the given root (Task 03D; split from root validation Task 03F)
+    SAM3D_MODEL_CODE_IMPORT      -- build_models/sam_3d_body_estimator/data.utils.io import (Task 03E)
+    SAM3D_MODEL_LOAD             -- load_sam_3d_body() succeeds
+    SAM3D_CORE_INFERENCE         -- process_one_image() succeeds, person found
+    MHR_PARAMS_SERIALIZED        -- write_interchange() succeeds
 
 (SAM3D_CORE_ENVIRONMENT -- whether this venv itself is usable at all -- is
 necessarily determined by the caller before this script can even run, so
@@ -97,13 +128,27 @@ opaque non-zero/negative return code.
 
 from __future__ import annotations
 
-import json
 import sys
-import time
-import traceback
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
+
+from sam3d_matplotlib_guard import (  # noqa: E402
+    HEADLESS_BACKEND,
+    classify_import_exception,
+    effective_matplotlib_backend,
+    force_headless_matplotlib_backend,
+)
+
+# Task 03F: force a headless backend BEFORE anything that might import
+# matplotlib as a side effect (sam_3d_body, pyrender, torchmetrics via
+# pytorch_lightning, etc.) -- must happen before `import sam_3d_body` below,
+# the earliest point in this module such an import could occur.
+_INHERITED_MPLBACKEND = force_headless_matplotlib_backend()
+
+import json  # noqa: E402
+import time  # noqa: E402
+import traceback  # noqa: E402
 
 from sam3d_source_path import (  # noqa: E402
     Sam3dSourceRootError,
@@ -136,8 +181,13 @@ def main() -> int:
         "stage": "startup",
         "python_version": sys.version.split()[0],
         "sam3d_source_root": sam3d_source_root,
+        "inherited_mplbackend": _INHERITED_MPLBACKEND,
+        "worker_mplbackend": HEADLESS_BACKEND,
+        "matplotlib_backend_effective": None,
+        "source_root_validation_ok": None,
         "source_import_ok": None,
         "model_code_import_ok": None,
+        "failure_category": None,
         "sam3d_module_file": None,
         "torch_version": None,
         "torch_cuda_version": None,
@@ -171,39 +221,54 @@ def main() -> int:
 
         telemetry["gpu_name"] = torch.cuda.get_device_name(0)
 
-        # --- SAM3D_SOURCE_IMPORT (Task 03D) ---
+        # --- SAM3D_SOURCE_ROOT_VALIDATION (Task 03F: split out of SAM3D_SOURCE_IMPORT) ---
         # Must succeed BEFORE any checkpoint/model-loading is attempted, so a
-        # missing-import failure here is never misreported as SAM3D_MODEL_LOAD_FAILURE.
+        # missing-root failure here is never misreported as SAM3D_MODEL_LOAD_FAILURE.
         # Task 03E: relies ONLY on this script's own sys.path.insert() from the explicit
         # sam3d_source_root argument -- never on an ambient/caller-supplied PYTHONPATH.
-        telemetry["stage"] = "source_import"
+        telemetry["stage"] = "source_root_validation"
         try:
             validated_root = validate_sam3d_source_root(sam3d_source_root)
         except Sam3dSourceRootError as exc:
-            telemetry["source_import_ok"] = False
-            telemetry["status"] = "source_import_failure"
-            telemetry["error"] = f"SAM3D_SOURCE_IMPORT_FAILURE: {exc}"
+            telemetry["source_root_validation_ok"] = False
+            telemetry["status"] = "source_root_validation_failure"
+            telemetry["failure_category"] = "SAM3D_SOURCE_ROOT_VALIDATION_FAILURE"
+            telemetry["error"] = f"SAM3D_SOURCE_ROOT_VALIDATION_FAILURE: {exc}"
             _write(telemetry_path, telemetry)
             return 1
+
+        telemetry["source_root_validation_ok"] = True
 
         if validated_root not in sys.path:
             sys.path.insert(0, validated_root)
 
+        # --- SAM3D_SOURCE_IMPORT ---
+        # Distinct from root validation above: the root can be perfectly valid (exists,
+        # has sam_3d_body/__init__.py) and `import sam_3d_body` can still fail for
+        # unrelated runtime reasons (Task 03F: an inherited, invalid Colab MPLBACKEND
+        # value crashing a transitive matplotlib import) -- never described as a
+        # source-root/path problem unless it actually is one.
+        telemetry["stage"] = "source_import"
         try:
             import sam_3d_body
-        except Exception as exc:  # noqa: BLE001 -- any import-time failure here is SAM3D_SOURCE_IMPORT_FAILURE
+        except Exception as exc:  # noqa: BLE001 -- classified below, never left generic
             telemetry["source_import_ok"] = False
             telemetry["status"] = "source_import_failure"
-            telemetry["error"] = f"SAM3D_SOURCE_IMPORT_FAILURE: {type(exc).__name__}: {exc}"
+            category = classify_import_exception(exc)
+            telemetry["failure_category"] = category
+            telemetry["error"] = f"{category}: {type(exc).__name__}: {exc}"
+            telemetry["matplotlib_backend_effective"] = effective_matplotlib_backend()
             _write(telemetry_path, telemetry)
             return 1
 
         telemetry["sam3d_module_file"] = sam_3d_body.__file__
+        telemetry["matplotlib_backend_effective"] = effective_matplotlib_backend()
         print("sam_3d_body.__file__ =", sam_3d_body.__file__)
 
         if not resolved_module_is_under_root(sam_3d_body.__file__, validated_root):
             telemetry["source_import_ok"] = False
             telemetry["status"] = "source_import_failure"
+            telemetry["failure_category"] = "SAM3D_SOURCE_IMPORT_FAILURE"
             telemetry["error"] = (
                 f"SAM3D_SOURCE_IMPORT_FAILURE: sam_3d_body imported from "
                 f"{sam_3d_body.__file__}, which is NOT under the intended source root "
@@ -229,7 +294,9 @@ def main() -> int:
         except Exception as exc:  # noqa: BLE001
             telemetry["model_code_import_ok"] = False
             telemetry["status"] = "model_code_import_failure"
+            telemetry["failure_category"] = "SAM3D_MODEL_CODE_IMPORT_FAILURE"
             telemetry["error"] = f"SAM3D_MODEL_CODE_IMPORT_FAILURE: {type(exc).__name__}: {exc}"
+            telemetry["matplotlib_backend_effective"] = effective_matplotlib_backend()
             _write(telemetry_path, telemetry)
             return 1
 

@@ -29,8 +29,19 @@ instructions: even after ``import sam_3d_body`` itself succeeds, importing
 its model-construction submodules (``build_models``/
 ``sam_3d_body_estimator``) is a separate, independently-observable Python
 import boundary, distinct from both the bare package import and from
-``load_sam_3d_body()`` actually reading checkpoint assets from disk.
-``classify()`` maps a :class:`PipelineState`
+``load_sam_3d_body()`` actually reading checkpoint assets from disk. Task
+03F adds three more: a real Colab run got past source-root resolution
+entirely and then failed *inside* ``import sam_3d_body`` itself with an
+inherited, invalid Colab Matplotlib backend value
+(``module://matplotlib_inline.backend_inline``) crashing a transitive
+``matplotlib`` import -- ``SAM3D_SOURCE_ROOT_VALIDATION_FAILURE`` now
+covers the root/path check alone (previously folded into
+``SAM3D_SOURCE_IMPORT_FAILURE``, per Task 03F section 6: "source-root
+validation and module execution are distinct"), while an import failure
+*after* a validated root is classified as either the specific
+``SAM3D_MATPLOTLIB_BACKEND_FAILURE`` or the general
+``SAM3D_IMPORT_RUNTIME_DEPENDENCY_FAILURE``, never mislabeled as a
+path/search problem that isn't actually true. ``classify()`` maps a :class:`PipelineState`
 (a plain record of what happened at each stage) to exactly one gate, plus
 a short human-readable reason -- so the notebook never has to eyeball a
 pile of booleans to decide which of A-F applies.
@@ -74,6 +85,13 @@ class FailureCategory(str, Enum):
     # to import -- still a Python-level failure, not a checkpoint/asset failure.
     SAM3D_MODEL_CODE_IMPORT_FAILURE = "SAM3D_MODEL_CODE_IMPORT_FAILURE"
 
+    # Task 03F additions -- source-root validation and module *execution* are
+    # distinct (section 6): a root can be perfectly valid and importing it can
+    # still fail for unrelated runtime reasons.
+    SAM3D_SOURCE_ROOT_VALIDATION_FAILURE = "SAM3D_SOURCE_ROOT_VALIDATION_FAILURE"
+    SAM3D_MATPLOTLIB_BACKEND_FAILURE = "SAM3D_MATPLOTLIB_BACKEND_FAILURE"
+    SAM3D_IMPORT_RUNTIME_DEPENDENCY_FAILURE = "SAM3D_IMPORT_RUNTIME_DEPENDENCY_FAILURE"
+
 
 class DecisionGate(str, Enum):
     END_TO_END_MEASUREMENTS_PRODUCED = "A"
@@ -96,6 +114,9 @@ _ENVIRONMENT_FAILURES = {
     FailureCategory.SAM3D_CORE_DEPENDENCY_FAILURE,
     FailureCategory.SAM3D_SOURCE_IMPORT_FAILURE,
     FailureCategory.SAM3D_MODEL_CODE_IMPORT_FAILURE,
+    FailureCategory.SAM3D_SOURCE_ROOT_VALIDATION_FAILURE,
+    FailureCategory.SAM3D_MATPLOTLIB_BACKEND_FAILURE,
+    FailureCategory.SAM3D_IMPORT_RUNTIME_DEPENDENCY_FAILURE,
 }
 
 
@@ -113,6 +134,7 @@ class PipelineState:
     hf_auth_ok: bool | None = None
     checkpoint_downloaded: bool | None = None
     dependencies_installed: bool | None = None  # Task 03B: Environment A (SAM 3D Body) build, specifically
+    sam3d_source_root_validation_ok: bool | None = None  # Task 03F: root exists, has sam_3d_body/__init__.py
     sam3d_source_import_ok: bool | None = None  # Task 03D: `import sam_3d_body` itself, distinct from model load
     sam3d_model_code_import_ok: bool | None = None  # Task 03E: build_models/estimator submodule imports
     sam3d_model_load_ok: bool | None = None  # Task 03C: load_sam_3d_body(), distinct from inference itself
@@ -168,13 +190,26 @@ def classify(state: PipelineState) -> tuple[DecisionGate, str]:
             f"environment{detail}.",
         )
 
+    if state.sam3d_source_root_validation_ok is False:
+        return (
+            DecisionGate.DEPENDENCY_ENVIRONMENT_BLOCKED,
+            "SAM 3D Body's environment built, but the given source root itself is "
+            "invalid (does not exist, or has no importable sam_3d_body/__init__.py) -- "
+            "this precedes and is distinct from `import sam_3d_body` actually being "
+            "attempted and failing (Task 03F section 6: source-root validation and "
+            "module execution are distinct).",
+        )
+
     if state.sam3d_source_import_ok is False:
         return (
             DecisionGate.DEPENDENCY_ENVIRONMENT_BLOCKED,
-            "SAM 3D Body's environment built, but `import sam_3d_body` itself failed "
-            "(the upstream repo root was not on the worker interpreter's module search "
-            "path, or resolved to an unrelated package) -- this precedes and is distinct "
-            "from load_sam_3d_body() failing after a successful import.",
+            "SAM 3D Body's environment built and the source root itself validated, but "
+            "`import sam_3d_body` itself failed once actually attempted -- see the "
+            "recorded failure category for the specific cause (an unrelated package "
+            "resolving instead of the intended repo, an inherited invalid Matplotlib "
+            "backend crashing a transitive import, or another runtime/dependency "
+            "error): this precedes and is distinct from load_sam_3d_body() failing "
+            "after a successful import.",
         )
 
     if state.sam3d_model_code_import_ok is False:
@@ -264,12 +299,20 @@ def phase_summary(state: PipelineState) -> dict:
     can succeed while `import sam_3d_body` itself still fails (wrong repo
     root on the module search path), which is a distinct, earlier failure
     than `load_sam_3d_body()` raising after a successful import. Task 03E
-    inserts a sixth, ``SAM3D_MODEL_CODE_IMPORT``, between source import and
+    inserted a sixth, ``SAM3D_MODEL_CODE_IMPORT``, between source import and
     model load -- the same Colab failure recurred, and going one boundary
     further separates "the bare `sam_3d_body` package imports" from "its
     model-construction submodules import" from "the checkpoint/model
-    itself loads". Each of the six Phase A boundaries
-    (``SAM3D_CORE_ENVIRONMENT``, ``SAM3D_SOURCE_IMPORT``,
+    itself loads". Task 03F inserts a seventh, ``SAM3D_SOURCE_ROOT_VALIDATION``,
+    as the very first Phase A boundary after the core environment -- a
+    real Colab run showed the source root can validate perfectly (exists,
+    has `sam_3d_body/__init__.py`) while `import sam_3d_body` itself still
+    fails for an unrelated runtime reason (an inherited, invalid Colab
+    Matplotlib backend value), so "the root is valid" and "the root
+    actually imports" must be independently observable (section 6:
+    "source-root validation and module execution are distinct"). Each of
+    the seven Phase A boundaries (``SAM3D_CORE_ENVIRONMENT``,
+    ``SAM3D_SOURCE_ROOT_VALIDATION``, ``SAM3D_SOURCE_IMPORT``,
     ``SAM3D_MODEL_CODE_IMPORT``, ``SAM3D_MODEL_LOAD``,
     ``SAM3D_CORE_INFERENCE``, ``MHR_PARAMS_SERIALIZED``) is independently
     reportable. Phase B's two fields (``MHR_CLAD_ENVIRONMENT``,
@@ -280,6 +323,7 @@ def phase_summary(state: PipelineState) -> dict:
     """
     fields = {
         "SAM3D_CORE_ENVIRONMENT": _phase_status(state.dependencies_installed),
+        "SAM3D_SOURCE_ROOT_VALIDATION": _phase_status(state.sam3d_source_root_validation_ok),
         "SAM3D_SOURCE_IMPORT": _phase_status(state.sam3d_source_import_ok),
         "SAM3D_MODEL_CODE_IMPORT": _phase_status(state.sam3d_model_code_import_ok),
         "SAM3D_MODEL_LOAD": _phase_status(state.sam3d_model_load_ok),
@@ -290,8 +334,8 @@ def phase_summary(state: PipelineState) -> dict:
     }
 
     phase_a_fields = [
-        "SAM3D_CORE_ENVIRONMENT", "SAM3D_SOURCE_IMPORT", "SAM3D_MODEL_CODE_IMPORT",
-        "SAM3D_MODEL_LOAD", "SAM3D_CORE_INFERENCE", "MHR_PARAMS_SERIALIZED",
+        "SAM3D_CORE_ENVIRONMENT", "SAM3D_SOURCE_ROOT_VALIDATION", "SAM3D_SOURCE_IMPORT",
+        "SAM3D_MODEL_CODE_IMPORT", "SAM3D_MODEL_LOAD", "SAM3D_CORE_INFERENCE", "MHR_PARAMS_SERIALIZED",
     ]
     fields["PHASE_A_SUCCESSFUL"] = "PASS" if all(fields[p] == "PASS" for p in phase_a_fields) else "FAIL"
 

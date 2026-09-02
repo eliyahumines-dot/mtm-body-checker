@@ -9,7 +9,7 @@ image -> SAM 3D Body -> MHR params -> clad-body -> anthropometric measurements
 This is an installability/interoperability/numerical-sanity test, not an
 accuracy benchmark. Findings from running the CLI-only path (no GPU, no
 checkpoint access): `docs/experiments/TASK02_SAM3D_MHR_CLAD_SMOKE_TEST.md`.
-Findings from five rounds of the real-GPU/real-checkpoint Colab path —
+Findings from six rounds of the real-GPU/real-checkpoint Colab path —
 Task 03 (first attempt), Task 03B (dual-environment fix, still failed on
 real Colab), Task 03C (minimal core inference, no Detectron2, fixed
 `chump`/`chumpy`, deterministic torch pin — got Environment A building for
@@ -21,12 +21,21 @@ real Colab run because Task 03D's fix partly relied on subprocess
 standalone script that does its own `sys.path.insert()` from an explicit
 CLI argument, verified against a real, non-mocked upstream clone, and adds
 a further `SAM3D_MODEL_CODE_IMPORT` boundary distinct from both source
-import and checkpoint loading):
+import and checkpoint loading), Task 03F (Task 03E's fix held — the
+`sys.path` resolved correctly — but a *third* real Colab run then failed
+*inside* `import sam_3d_body` itself with `ValueError: Key backend:
+'module://matplotlib_inline.backend_inline' is not a valid value for
+backend`; Task 03F forces a headless `MPLBACKEND=Agg` in every standalone
+Environment A process, verified against the real upstream clone with the
+exact invalid inherited value, and splits source-root validation out as
+its own `SAM3D_SOURCE_ROOT_VALIDATION` boundary distinct from the import
+actually executing):
 `docs/experiments/TASK03_COLAB_END_TO_END_SMOKE_TEST.md`,
 `docs/experiments/TASK03B_DEPENDENCY_RESOLUTION.md`,
 `docs/experiments/TASK03C_MINIMAL_CORE_INFERENCE.md`,
 `docs/experiments/TASK03D_SAM3D_IMPORT_PATH_FIX.md`,
-`docs/experiments/TASK03E_SAM3D_SOURCE_IMPORT_HARDENING.md`, and
+`docs/experiments/TASK03E_SAM3D_SOURCE_IMPORT_HARDENING.md`,
+`docs/experiments/TASK03F_MATPLOTLIB_BACKEND_FIX.md`, and
 `notebooks/TASK03_SAM3D_MHR_CLAD_COLAB.ipynb` (that notebook reuses every
 module in this directory — see below).
 
@@ -55,12 +64,13 @@ module in this directory — see below).
   (`parse_last_stage()`).
 - `decision_gate.py` — deterministic classification of a pipeline run into
   one of Task 03's six decision-gate letters (A–F) from a
-  `PipelineState` record of what happened at each stage, plus 19 named
+  `PipelineState` record of what happened at each stage, plus 22 named
   failure categories (11 original + 6 added in Task 03C + 1 in Task 03D +
-  1 in Task 03E for precise Phase A diagnostics). `phase_summary()` reports
-  eleven independent PASS/FAIL/NOT_ATTEMPTED phase fields — six for Phase A
-  (`SAM3D_CORE_ENVIRONMENT`, `SAM3D_SOURCE_IMPORT` (Task 03D),
-  `SAM3D_MODEL_CODE_IMPORT` (Task 03E), `SAM3D_MODEL_LOAD`,
+  1 in Task 03E + 3 in Task 03F for precise Phase A diagnostics).
+  `phase_summary()` reports twelve independent PASS/FAIL/NOT_ATTEMPTED
+  phase fields — seven for Phase A (`SAM3D_CORE_ENVIRONMENT`,
+  `SAM3D_SOURCE_ROOT_VALIDATION` (Task 03F), `SAM3D_SOURCE_IMPORT`
+  (Task 03D), `SAM3D_MODEL_CODE_IMPORT` (Task 03E), `SAM3D_MODEL_LOAD`,
   `SAM3D_CORE_INFERENCE`, `MHR_PARAMS_SERIALIZED`), two for Phase B
   (`MHR_CLAD_ENVIRONMENT`, `MHR_CLAD_EXTRACTION`), plus
   `PHASE_A_SUCCESSFUL` and `END_TO_END` — and the first failing boundary.
@@ -81,22 +91,46 @@ module in this directory — see below).
   Colab hardware — Environment A itself was confirmed fully working
   (torch/CUDA/GPU/pin all PASS) but nothing pointed the worker
   interpreter at the cloned repo.
-- `_sam3d_source_import_check.py` (Task 03E) — standalone pre-flight
-  script, independently runnable and independently testable: takes
-  `sam3d_source_root` as an explicit CLI argument and does its own
+- `sam3d_matplotlib_guard.py` (Task 03F) — single source of truth for
+  forcing every standalone Environment A process's `MPLBACKEND` to `Agg`,
+  unconditionally (never `setdefault()`). Fixes a real
+  `ValueError: Key backend: 'module://matplotlib_inline.backend_inline'
+  is not a valid value for backend` observed on real Colab hardware:
+  Colab's interactive kernel sets that value, a standalone subprocess
+  inherits it by default, and `torchmetrics` (via `pytorch_lightning`)
+  imports matplotlib as a side effect during `import sam_3d_body`, which
+  then can't activate the inherited, notebook-only backend name. Provides
+  `force_headless_matplotlib_backend()` (called at the very top of both
+  scripts below, before anything that might import matplotlib),
+  `sanitized_subprocess_env()` (for the notebook's own subprocess `env=`,
+  a redundant first layer), `effective_matplotlib_backend()` (reports the
+  actual backend without ever force-importing matplotlib), and
+  `classify_import_exception()` (distinguishes this specific failure from
+  a general import-time runtime/dependency failure, retaining the full
+  exception text either way). Deliberately does **not** add
+  `matplotlib-inline` as a dependency — that would only mask this one
+  inherited value, not fix a headless process depending on
+  whatever backend its launching kernel happened to have configured.
+- `_sam3d_source_import_check.py` (Task 03E, revised Task 03F) — standalone
+  pre-flight script, independently runnable and independently testable:
+  takes `sam3d_source_root` as an explicit CLI argument and does its own
   `sys.path.insert()` internally, with **no** subprocess `env=PYTHONPATH`
   reliance at all. Replaces Task 03D's notebook-inline `-c` preflight,
   which set `env=PYTHONPATH` — a second real Colab run showed that
   mechanism was not actually sufficient (the identical
   `ModuleNotFoundError` recurred), for a reason this project's own sandbox
-  cannot reproduce or observe directly. Reports `SAM3D_SOURCE_IMPORT` and
-  a further `SAM3D_MODEL_CODE_IMPORT` boundary (SAM 3D Body's own
-  `build_models`/`sam_3d_body_estimator` submodules importing cleanly,
-  distinct from `SAM3D_MODEL_LOAD` needing real checkpoint assets) as two
-  independently-observable PASS/FAIL results, printed before any
-  checkpoint download is attempted. Verified in this task against a real,
-  non-mocked clone of `facebookresearch/sam-3d-body`, not only synthetic
-  fixtures.
+  cannot reproduce or observe directly. Reports three independently-
+  observable PASS/FAIL results, printed before any checkpoint download is
+  attempted: `SAM3D_SOURCE_ROOT_VALIDATION` (Task 03F: the root exists and
+  is importable, split out as its own boundary — a real Colab run showed
+  this can PASS while the import itself still fails for an unrelated
+  runtime reason), `SAM3D_SOURCE_IMPORT` (the import actually executing),
+  and `SAM3D_MODEL_CODE_IMPORT` (SAM 3D Body's own `build_models`/
+  `sam_3d_body_estimator` submodules importing cleanly, distinct from
+  `SAM3D_MODEL_LOAD` needing real checkpoint assets). Verified in this task
+  against a real, non-mocked clone of `facebookresearch/sam-3d-body`, not
+  only synthetic fixtures — including with the exact invalid inherited
+  `MPLBACKEND` value from the real Colab failure this task fixes.
 - `install_log.py` (Task 03C) — structured failure logging for every
   install command the notebook runs (exact command, return code, stderr
   tail, failure category). Fixes a real bug: Task 03B's notebook printed
@@ -109,10 +143,14 @@ module in this directory — see below).
   only, no pickle, loadable from either side regardless of which torch
   build is installed there. Builds on `adapter.py`'s validation, so it
   inherits the same `scale_params` exclusion guarantee.
-- `_sam3d_inference_worker.py` (Task 03B, revised Task 03C/03D/03E) —
-  Environment A's subprocess entry point: takes a validated
-  `sam3d_source_root` and performs a two-stage pre-flight import check —
-  `SAM3D_SOURCE_IMPORT` (bare `import sam_3d_body`) then
+- `_sam3d_inference_worker.py` (Task 03B, revised Task 03C/03D/03E/03F) —
+  Environment A's subprocess entry point: forces a headless Matplotlib
+  backend at the very top of the module (Task 03F, via
+  `sam3d_matplotlib_guard`), then takes a validated `sam3d_source_root` and
+  performs a three-stage pre-flight import check — `SAM3D_SOURCE_ROOT_VALIDATION`
+  (Task 03F: the root exists and is importable), `SAM3D_SOURCE_IMPORT`
+  (bare `import sam_3d_body` actually executing, classified via
+  `sam3d_matplotlib_guard.classify_import_exception()` if it fails), then
   `SAM3D_MODEL_CODE_IMPORT` (Task 03E: `build_models`/
   `sam_3d_body_estimator` submodule imports, split out as its own boundary,
   distinct from a model-load failure — see the module docstring), loads the
