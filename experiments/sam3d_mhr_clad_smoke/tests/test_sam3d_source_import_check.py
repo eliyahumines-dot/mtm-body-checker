@@ -1,17 +1,20 @@
 """Tests for _sam3d_source_import_check.py -- Task 03E's standalone,
-env=PYTHONPATH-free SAM3D_SOURCE_IMPORT / SAM3D_MODEL_CODE_IMPORT
-pre-flight script.
+env=PYTHONPATH-free SAM3D_SOURCE_ROOT_VALIDATION / SAM3D_SOURCE_IMPORT /
+SAM3D_MODEL_CODE_IMPORT pre-flight script (Task 03F: source-root validation
+split out as its own boundary, and a headless Matplotlib backend forced
+before any import that might pull matplotlib in as a side effect).
 
-Two kinds of coverage, per Task 03E section 8:
+Two kinds of coverage, per Task 03E section 8 / Task 03F section 10:
 
 1. Synthetic fixtures (`_make_fake_source_root` et al.) -- no torch, no
    GPU, no real checkout required. These run in any CI environment and
    cover: valid/invalid source root, correct sys.path insertion,
    deterministic behavior, a source root containing spaces, source root
    independence from cwd, an unrelated installed module failing to
-   override the supplied source root, SAM3D_SOURCE_IMPORT_FAILURE /
-   SAM3D_MODEL_CODE_IMPORT_FAILURE production, and downstream boundaries
-   staying NOT_ATTEMPTED (None) after an earlier one fails.
+   override the supplied source root, each failure category, downstream
+   boundaries staying NOT_ATTEMPTED (None) after an earlier one fails, an
+   inherited invalid MPLBACKEND being overridden, and Matplotlib-backend
+   failures being classified distinctly from other import-time failures.
 
 2. A REAL, non-mocked import preflight against an actual
    `facebookresearch/sam-3d-body` checkout (`test_real_upstream_...`
@@ -22,17 +25,17 @@ Two kinds of coverage, per Task 03E section 8:
    pre-built Environment-A-equivalent venv + a real clone via the
    `SAM3D_TEST_PYTHON` / `SAM3D_TEST_SOURCE_ROOT` environment variables
    (falling back to this task's own `/tmp/env_sam3d_test` +
-   `/tmp/sam3d_e2e_clone`, built and verified while diagnosing this task),
+   `/tmp/sam3d_e2e_clone`, built and verified while diagnosing Task 03E/F),
    and skips with an explicit, honest reason if neither is available --
    it never fabricates a pass. This agent has already run this exact
-   check for real, directly (not only via pytest), while diagnosing this
-   task: `sam_3d_body.__file__` resolved to
-   `/tmp/sam3d_e2e_clone/sam_3d_body/__init__.py`, both stages PASS.
+   check for real, directly (not only via pytest): with the exact invalid
+   Colab MPLBACKEND value inherited, `sam_3d_body.__file__` still resolved
+   to `/tmp/sam3d_e2e_clone/sam_3d_body/__init__.py` and all three stages
+   PASS, effective matplotlib backend `Agg`.
 """
 
 import json
 import os
-import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -82,6 +85,17 @@ def _make_fake_source_root(root: Path, model_code_importable: bool = True) -> Pa
     return root
 
 
+def _make_fake_source_root_with_init_error(root: Path, error_code: str) -> Path:
+    """Build a synthetic sam_3d_body package whose `__init__.py` itself
+    raises at import time (simulating a runtime/dependency failure reached
+    only after a genuinely valid source root -- Task 03F section 4/6:
+    the root exists and validates, but `import sam_3d_body` still fails)."""
+    pkg = root / "sam_3d_body"
+    pkg.mkdir(parents=True)
+    (pkg / "__init__.py").write_text(error_code)
+    return root
+
+
 def _run_script(source_root: str, telemetry_path: str | None = None, env: dict | None = None, cwd: str | None = None):
     cmd = [sys.executable, SCRIPT, source_root]
     if telemetry_path:
@@ -92,36 +106,92 @@ def _run_script(source_root: str, telemetry_path: str | None = None, env: dict |
 
 # --- valid / invalid source root ---
 
-def test_valid_source_root_both_stages_pass(tmp_path):
+def test_valid_source_root_all_three_stages_pass(tmp_path):
     root = _make_fake_source_root(tmp_path / "sam3d_root")
     telemetry = preflight.run_preflight(str(root))
+    assert telemetry["source_root_validation_ok"] is True
     assert telemetry["source_import_ok"] is True
     assert telemetry["model_code_import_ok"] is True
     assert telemetry["error"] is None
+    assert telemetry["failure_category"] is None
     assert telemetry["sam3d_module_file"] == str(root / "sam_3d_body" / "__init__.py")
 
 
-def test_invalid_source_root_fails_with_source_import_failure(tmp_path):
+def test_invalid_source_root_fails_at_root_validation_not_source_import(tmp_path):
+    """Task 03F section 6: source-root validation and module execution are
+    distinct -- a nonexistent root must be reported as
+    SAM3D_SOURCE_ROOT_VALIDATION_FAILURE, never as SAM3D_SOURCE_IMPORT_FAILURE
+    (which now means the root validated but `import sam_3d_body` itself
+    failed once actually attempted)."""
     telemetry = preflight.run_preflight(str(tmp_path / "does_not_exist"))
-    assert telemetry["source_import_ok"] is False
+    assert telemetry["source_root_validation_ok"] is False
+    assert telemetry["source_import_ok"] is None  # never attempted
     assert telemetry["model_code_import_ok"] is None  # never attempted
-    assert "SAM3D_SOURCE_IMPORT_FAILURE" in telemetry["error"]
+    assert telemetry["failure_category"] == "SAM3D_SOURCE_ROOT_VALIDATION_FAILURE"
+    assert "SAM3D_SOURCE_ROOT_VALIDATION_FAILURE" in telemetry["error"]
 
 
 # --- downstream boundaries stay NOT_ATTEMPTED (None), not FAIL, after an earlier failure ---
 
-def test_downstream_boundary_not_attempted_after_source_import_failure(tmp_path):
+def test_downstream_boundaries_not_attempted_after_root_validation_failure(tmp_path):
     telemetry = preflight.run_preflight(str(tmp_path / "nope"))
+    assert telemetry["source_import_ok"] is None
     assert telemetry["model_code_import_ok"] is None
+
+
+def test_downstream_boundary_not_attempted_after_source_import_failure(tmp_path):
+    root = _make_fake_source_root_with_init_error(tmp_path / "sam3d_root", "raise RuntimeError('boom')\n")
+    telemetry = preflight.run_preflight(str(root))
+    assert telemetry["source_root_validation_ok"] is True
+    assert telemetry["source_import_ok"] is False
+    assert telemetry["model_code_import_ok"] is None  # never attempted
 
 
 def test_model_code_import_failure_is_distinct_from_source_import_failure(tmp_path):
     root = _make_fake_source_root(tmp_path / "sam3d_root", model_code_importable=False)
     telemetry = preflight.run_preflight(str(root))
+    assert telemetry["source_root_validation_ok"] is True
     assert telemetry["source_import_ok"] is True  # bare package import DID succeed
     assert telemetry["model_code_import_ok"] is False
+    assert telemetry["failure_category"] == "SAM3D_MODEL_CODE_IMPORT_FAILURE"
     assert "SAM3D_MODEL_CODE_IMPORT_FAILURE" in telemetry["error"]
     assert "SAM3D_SOURCE_IMPORT_FAILURE" not in telemetry["error"]
+    assert "SAM3D_SOURCE_ROOT_VALIDATION_FAILURE" not in telemetry["error"]
+
+
+# --- Task 03F: distinguishing the Matplotlib-backend failure from a general one ---
+
+def test_matplotlib_backend_failure_is_classified_distinctly(tmp_path):
+    """Reproduces the real Colab failure's exact shape: the root validates
+    and `import sam_3d_body` is attempted, but raises an error whose text
+    matches the actual observed exception (a Matplotlib backend ValueError)
+    -- must be tagged SAM3D_MATPLOTLIB_BACKEND_FAILURE, not a generic
+    source-import or runtime-dependency failure."""
+    root = _make_fake_source_root_with_init_error(
+        tmp_path / "sam3d_root",
+        "raise ValueError(\"Key backend: 'module://matplotlib_inline.backend_inline' "
+        "is not a valid value for backend\")\n",
+    )
+    telemetry = preflight.run_preflight(str(root))
+    assert telemetry["source_root_validation_ok"] is True
+    assert telemetry["source_import_ok"] is False
+    assert telemetry["failure_category"] == "SAM3D_MATPLOTLIB_BACKEND_FAILURE"
+    assert "SAM3D_MATPLOTLIB_BACKEND_FAILURE" in telemetry["error"]
+    assert "not a valid value for backend" in telemetry["error"]  # underlying exception retained
+
+
+def test_unrelated_import_failure_is_classified_as_general_runtime_dependency_failure(tmp_path):
+    """A completely unrelated import-time failure (nothing to do with
+    Matplotlib) must fall back to the general category, not be
+    misclassified as the specific Matplotlib one."""
+    root = _make_fake_source_root_with_init_error(
+        tmp_path / "sam3d_root", "raise ImportError('No module named some_other_thing')\n",
+    )
+    telemetry = preflight.run_preflight(str(root))
+    assert telemetry["source_root_validation_ok"] is True
+    assert telemetry["source_import_ok"] is False
+    assert telemetry["failure_category"] == "SAM3D_IMPORT_RUNTIME_DEPENDENCY_FAILURE"
+    assert "some_other_thing" in telemetry["error"]  # underlying exception retained
 
 
 # --- Sam3dSourceRootError propagation from validate_sam3d_source_root ---
@@ -288,3 +358,48 @@ def test_real_upstream_sam3d_source_import_check(tmp_path):
     real_root = os.path.realpath(source_root)
     resolved_module = os.path.realpath(written["sam3d_module_file"])
     assert os.path.commonpath([resolved_module, real_root]) == real_root
+
+
+def test_real_upstream_import_survives_the_exact_invalid_colab_mplbackend(tmp_path):
+    """Reproduces Task 03F's exact reported failure and its fix, for real:
+    launches this script with the precise invalid MPLBACKEND value Colab's
+    kernel sets inherited into the subprocess's environment (as a real
+    Colab-launched worker subprocess would inherit it), against the same
+    real clone + real dependency-complete venv as the test above.
+
+    Before this task's fix, this reproduced the exact reported traceback:
+    `ValueError: Key backend: 'module://matplotlib_inline.backend_inline'
+    is not a valid value for backend`, raised from deep inside
+    `torchmetrics.utilities.plot` (imported transitively via
+    `pytorch_lightning`) while executing `import sam_3d_body`. After the
+    fix, the same inherited value must have no effect at all."""
+    python_exe, source_root = _resolve_real_test_env()
+    if python_exe is None:
+        pytest.skip(
+            "No pre-built Environment-A-equivalent venv + real sam-3d-body checkout available "
+            "in this sandbox. This is a real integration test against actual upstream code, not "
+            "a mock, so it cannot fabricate a pass."
+        )
+    telemetry_path = tmp_path / "real_mplbackend_telemetry.json"
+    env = os.environ.copy()
+    env["MPLBACKEND"] = "module://matplotlib_inline.backend_inline"
+    proc = subprocess.run(
+        [python_exe, SCRIPT, source_root, str(telemetry_path)],
+        capture_output=True, text=True, timeout=120, env=env,
+    )
+    print(proc.stdout)
+    print(proc.stderr)
+    assert "Inherited MPLBACKEND: module://matplotlib_inline.backend_inline" in proc.stdout
+    assert "Worker MPLBACKEND: Agg" in proc.stdout
+    assert "SAM3D_SOURCE_ROOT_VALIDATION: PASS" in proc.stdout
+    assert "SAM3D_SOURCE_IMPORT: PASS" in proc.stdout, proc.stdout + proc.stderr
+    assert "SAM3D_MODEL_CODE_IMPORT: PASS" in proc.stdout, proc.stdout + proc.stderr
+    assert "not a valid value for backend" not in (proc.stdout + proc.stderr)
+    assert proc.returncode == 0
+    written = json.loads(telemetry_path.read_text())
+    assert written["inherited_mplbackend"] == "module://matplotlib_inline.backend_inline"
+    assert written["worker_mplbackend"] == "Agg"
+    assert written["matplotlib_backend_effective"] == "Agg"
+    assert written["source_root_validation_ok"] is True
+    assert written["source_import_ok"] is True
+    assert written["model_code_import_ok"] is True
