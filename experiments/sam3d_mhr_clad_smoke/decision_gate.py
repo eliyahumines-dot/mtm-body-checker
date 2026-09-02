@@ -5,11 +5,19 @@ tested without any heavy dependency, and reused identically by both a CLI
 run and the Colab notebook's final cell (Task 03 section 15/18), rather
 than reimplementing the same classification inline in notebook prose.
 
-The eleven ``FailureCategory`` values and six ``DecisionGate`` values are
-taken verbatim from Task 03's specification. ``classify()`` maps a
-:class:`PipelineState` (a plain record of what happened at each stage) to
-exactly one gate, plus a short human-readable reason -- so the notebook
-never has to eyeball a pile of booleans to decide which of A-F applies.
+The original eleven ``FailureCategory`` values and six ``DecisionGate``
+values are taken verbatim from Task 03's specification; Task 03C adds six
+more failure categories (``WRONG_DEPENDENCY_CHUMPY``,
+``TORCH_VERSION_DRIFT``, ``TORCHVISION_VERSION_DRIFT``,
+``SAM3D_CORE_DEPENDENCY_FAILURE``, ``SAM3D_MODEL_LOAD_FAILURE``,
+``SAM3D_CORE_INFERENCE_FAILURE``) for more precise Phase A diagnostics,
+after a real Colab run reported "Recorded failure categories: none"
+despite two observed build failures -- every install command's failure
+now gets a specific category (see ``install_log.py``), never silently
+just a `False` boolean. ``classify()`` maps a :class:`PipelineState` (a
+plain record of what happened at each stage) to exactly one gate, plus a
+short human-readable reason -- so the notebook never has to eyeball a
+pile of booleans to decide which of A-F applies.
 """
 
 from __future__ import annotations
@@ -31,6 +39,14 @@ class FailureCategory(str, Enum):
     CLAD_BODY_FAILURE = "CLAD_BODY_FAILURE"
     METRIC_SCALE_UNKNOWN = "METRIC_SCALE_UNKNOWN"
 
+    # Task 03C additions -- more precise Phase A diagnostics.
+    WRONG_DEPENDENCY_CHUMPY = "WRONG_DEPENDENCY_CHUMPY"
+    TORCH_VERSION_DRIFT = "TORCH_VERSION_DRIFT"
+    TORCHVISION_VERSION_DRIFT = "TORCHVISION_VERSION_DRIFT"
+    SAM3D_CORE_DEPENDENCY_FAILURE = "SAM3D_CORE_DEPENDENCY_FAILURE"
+    SAM3D_MODEL_LOAD_FAILURE = "SAM3D_MODEL_LOAD_FAILURE"
+    SAM3D_CORE_INFERENCE_FAILURE = "SAM3D_CORE_INFERENCE_FAILURE"
+
 
 class DecisionGate(str, Enum):
     END_TO_END_MEASUREMENTS_PRODUCED = "A"
@@ -47,6 +63,10 @@ _ENVIRONMENT_FAILURES = {
     FailureCategory.INSTALL_FAILURE,
     FailureCategory.CUDA_PYTORCH_MISMATCH,
     FailureCategory.PYMOMENTUM_FAILURE,
+    FailureCategory.WRONG_DEPENDENCY_CHUMPY,
+    FailureCategory.TORCH_VERSION_DRIFT,
+    FailureCategory.TORCHVISION_VERSION_DRIFT,
+    FailureCategory.SAM3D_CORE_DEPENDENCY_FAILURE,
 }
 
 
@@ -64,6 +84,7 @@ class PipelineState:
     hf_auth_ok: bool | None = None
     checkpoint_downloaded: bool | None = None
     dependencies_installed: bool | None = None  # Task 03B: Environment A (SAM 3D Body) build, specifically
+    sam3d_model_load_ok: bool | None = None  # Task 03C: load_sam_3d_body(), distinct from inference itself
     sam3d_inference_ok: bool | None = None
     mhr_schema_valid: bool | None = None
     mhr_clad_environment_ok: bool | None = None  # Task 03B: Environment B build + bundled-fixture self-test
@@ -114,6 +135,15 @@ def classify(state: PipelineState) -> tuple[DecisionGate, str]:
             DecisionGate.DEPENDENCY_ENVIRONMENT_BLOCKED,
             f"Dependency installation did not converge to a working GPU-compatible "
             f"environment{detail}.",
+        )
+
+    if state.sam3d_model_load_ok is False:
+        return (
+            DecisionGate.DEPENDENCY_ENVIRONMENT_BLOCKED,
+            "SAM 3D Body's environment built, but load_sam_3d_body() itself failed "
+            "(checkpoint/asset path mismatch, or a version incompatibility not caught "
+            "by the torch/torchvision pin check) -- this is distinct from an inference-"
+            "time failure, which never got the chance to run.",
         )
 
     if state.sam3d_inference_ok is False:
@@ -173,33 +203,44 @@ def _phase_status(value: bool | None) -> str:
 
 
 def phase_summary(state: PipelineState) -> dict:
-    """Task 03B section 11: report the five phases independently
-    (SAM3D_ENVIRONMENT, SAM3D_INFERENCE, MHR_CLAD_ENVIRONMENT,
-    MHR_CLAD_EXTRACTION, END_TO_END), each as PASS / FAIL / NOT_ATTEMPTED,
-    plus the first exact failing boundary -- deliberately not collapsed
-    into a single letter grade the way :func:`classify` is, since Task 03B
-    asks for these to be visible separately.
+    """Report every phase independently, each as PASS / FAIL /
+    NOT_ATTEMPTED, plus the first exact failing boundary and a derived
+    ``PHASE_A_SUCCESSFUL`` flag -- deliberately not collapsed into a
+    single letter grade the way :func:`classify` is.
+
+    Task 03C section 7 splits what Task 03B called ``SAM3D_ENVIRONMENT``/
+    ``SAM3D_INFERENCE`` into four Phase A boundaries
+    (``SAM3D_CORE_ENVIRONMENT``, ``SAM3D_MODEL_LOAD``,
+    ``SAM3D_CORE_INFERENCE``, ``MHR_PARAMS_SERIALIZED``), each
+    independently reportable, so a model-load failure is never conflated
+    with an inference-time failure or a serialization failure. Phase B's
+    two fields (``MHR_CLAD_ENVIRONMENT``, ``MHR_CLAD_EXTRACTION``) are
+    unchanged from Task 03B.
 
     Does not replace :func:`classify`; both read the same
     :class:`PipelineState` and are safe to call together.
     """
     fields = {
-        "SAM3D_ENVIRONMENT": _phase_status(state.dependencies_installed),
-        "SAM3D_INFERENCE": _phase_status(state.sam3d_inference_ok),
+        "SAM3D_CORE_ENVIRONMENT": _phase_status(state.dependencies_installed),
+        "SAM3D_MODEL_LOAD": _phase_status(state.sam3d_model_load_ok),
+        "SAM3D_CORE_INFERENCE": _phase_status(state.sam3d_inference_ok),
+        "MHR_PARAMS_SERIALIZED": _phase_status(state.mhr_schema_valid),
         "MHR_CLAD_ENVIRONMENT": _phase_status(state.mhr_clad_environment_ok),
         "MHR_CLAD_EXTRACTION": _phase_status(state.clad_body_measure_ok),
     }
 
+    phase_a_fields = ["SAM3D_CORE_ENVIRONMENT", "SAM3D_MODEL_LOAD", "SAM3D_CORE_INFERENCE", "MHR_PARAMS_SERIALIZED"]
+    fields["PHASE_A_SUCCESSFUL"] = "PASS" if all(fields[p] == "PASS" for p in phase_a_fields) else "FAIL"
+
     end_to_end = (
-        fields["SAM3D_ENVIRONMENT"] == "PASS"
-        and fields["SAM3D_INFERENCE"] == "PASS"
+        fields["PHASE_A_SUCCESSFUL"] == "PASS"
         and fields["MHR_CLAD_ENVIRONMENT"] == "PASS"
         and fields["MHR_CLAD_EXTRACTION"] == "PASS"
         and bool(state.measurements)
     )
     fields["END_TO_END"] = "PASS" if end_to_end else "FAIL"
 
-    ordered_phases = ["SAM3D_ENVIRONMENT", "SAM3D_INFERENCE", "MHR_CLAD_ENVIRONMENT", "MHR_CLAD_EXTRACTION"]
+    ordered_phases = phase_a_fields + ["MHR_CLAD_ENVIRONMENT", "MHR_CLAD_EXTRACTION"]
     fields["first_failing_boundary"] = next((p for p in ordered_phases if fields[p] == "FAIL"), None)
 
     return fields

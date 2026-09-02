@@ -8,6 +8,21 @@ confirmed working (see the "Update (Task 03B)" section in
 This document covers only the dependency/environment fix — those three
 confirmed-working areas were not re-investigated.
 
+**Update (Task 03C):** the real human Colab run of *this* document's
+notebook redesign also failed — `chumpy` and `detectron2` wheel build
+failures, and the environment drifted to `torch 2.11.0+cu130` /
+`torchvision 0.26.0+cu130`, nowhere near anything requested here. The
+ambient-kernel-pin strategy this document describes for Environment A
+(reproduce whatever Colab's default torch/torchvision happens to be) is
+**rejected** as a result — replaced with a fixed, explicit pin
+(`torch==2.8.0`, `torchvision==0.23.0`) and, separately, Detectron2 is
+removed from the smoke test entirely. See
+`docs/experiments/TASK03C_MINIMAL_CORE_INFERENCE.md` for the full
+correction, including the `chump`-vs-`chumpy` root cause (a transcription
+mistake introduced when this document's notebook was first written, not
+an upstream change). Environment B's design (Pixi-preferred MHR/clad-body,
+below) is unchanged by Task 03C.
+
 **Like Task 03, this redesign was authored and structurally validated by
 this agent but not executed** — this sandbox still has no GPU (confirmed
 identically in Task 02 and Task 03). Everything below is a reasoned,
