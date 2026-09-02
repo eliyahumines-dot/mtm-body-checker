@@ -1,9 +1,10 @@
 """Environment A worker: run real, minimal-core SAM 3D Body inference and
-write the interchange file (Task 03B, revised Task 03C, revised Task 03D).
+write the interchange file (Task 03B, revised Task 03C/03D/03E).
 
 Invoked as a subprocess using Environment A's own dedicated venv Python --
 see notebooks/TASK03_SAM3D_MHR_CLAD_COLAB.ipynb (PHASE A0-A5) and
-docs/experiments/TASK03D_SAM3D_IMPORT_PATH_FIX.md.
+docs/experiments/TASK03D_SAM3D_IMPORT_PATH_FIX.md,
+docs/experiments/TASK03E_SAM3D_SOURCE_IMPORT_HARDENING.md.
 
 Task 03D fix: a real Colab run with a fully working Environment A (torch/
 CUDA/GPU/pin all verified) still failed with `ModuleNotFoundError: No
@@ -11,17 +12,43 @@ module named 'sam_3d_body'`, because the upstream `facebookresearch/
 sam-3d-body` repo root was never on this interpreter's module search path
 -- that repo has no `pyproject.toml`/`setup.py`/`setup.cfg` (confirmed
 directly against a fresh clone), so it cannot be `pip install -e .`'d;
-its root must be used directly on `sys.path`. This worker now takes that
+its root must be used directly on `sys.path`. This worker takes that
 root as an explicit, validated argument (`sam3d_source_root`) and performs
 a pre-flight import check -- `import sam_3d_body`, resolve
 `sam_3d_body.__file__`, confirm it actually falls under the given root --
-BEFORE attempting checkpoint/model loading, so "Python cannot import
-sam_3d_body" (`SAM3D_SOURCE_IMPORT_FAILURE`) is never conflated with
-"load_sam_3d_body() failed after a successful import"
-(`SAM3D_MODEL_LOAD_FAILURE`, Task 03D section 6). The calling notebook
-also sets `PYTHONPATH` when launching this subprocess (the "preferred
-solution" per Task 03D section 3) -- this script's own `sys.path.insert()`
-is a second, independently-verifiable mechanism, not a replacement for it.
+BEFORE attempting checkpoint/model loading.
+
+Task 03E fix: the *same* Colab failure recurred on a second run, meaning
+Task 03D's fix (which relied partly on the notebook also setting
+`PYTHONPATH` on the subprocess `env=`) was not actually sufficient in real
+Colab -- a mechanism this agent's sandbox cannot reproduce a failure in
+either way, so rather than continue guessing at Colab-specific env-var
+propagation, every remaining reliance on `env=PYTHONPATH` has been removed
+in favor of *only* this script's own deterministic `sys.path.insert()`
+from the explicit CLI argument (never cwd, never ambient `PYTHONPATH`).
+Task 03E also splits what was one conflated `source_import` stage into
+two independently-reportable ones, matching the standalone
+`_sam3d_source_import_check.py` pre-flight script exactly:
+
+    SAM3D_SOURCE_IMPORT      -- bare `import sam_3d_body` resolves, and
+                                 under the given root (not an unrelated
+                                 installed package).
+    SAM3D_MODEL_CODE_IMPORT  -- `from sam_3d_body.build_models import
+                                 load_sam_3d_body`, `from sam_3d_body.
+                                 sam_3d_body_estimator import
+                                 SAM3DBodyEstimator`, and this project's
+                                 own `sam_3d_body.data.utils.io.load_image`
+                                 dependency -- SAM 3D Body's own Python code
+                                 constructing without error, distinct from
+                                 checkpoint/model *loading* itself
+                                 (SAM3D_MODEL_LOAD, which needs real
+                                 checkpoint assets).
+
+Every "not yet attempted" telemetry field now defaults to `None`, not
+`False` -- Task 03E section 7's "cascading false failures" bug: a `False`
+default, combined with `bool(telemetry.get(...))` coercion in the notebook,
+silently turned "this stage never ran because an earlier one failed" into
+a reported FAIL rather than NOT_ATTEMPTED for every downstream stage.
 
 Task 03C deliberately removes every optional component from the actual
 inference call: no human_detector (no Detectron2/ViTDet), no
@@ -48,6 +75,7 @@ Reports each Phase A boundary independently via
 can be told apart from the others:
 
     SAM3D_SOURCE_IMPORT     -- `import sam_3d_body` resolves under the given root (Task 03D)
+    SAM3D_MODEL_CODE_IMPORT -- build_models/sam_3d_body_estimator/data.utils.io import (Task 03E)
     SAM3D_MODEL_LOAD        -- load_sam_3d_body() succeeds
     SAM3D_CORE_INFERENCE    -- process_one_image() succeeds, person found
     MHR_PARAMS_SERIALIZED   -- write_interchange() succeeds
@@ -100,27 +128,31 @@ def main() -> int:
 
     image_path, checkpoint_dir, sam3d_source_root, interchange_path, telemetry_path = sys.argv[1:6]
 
+    # Task 03E: every "not yet attempted" field defaults to None, never False --
+    # a False default here previously got coerced by the notebook's bool(telemetry.get(...))
+    # into a reported FAIL for a stage that never even ran (cascading false failures).
     telemetry = {
         "status": "error",
         "stage": "startup",
         "python_version": sys.version.split()[0],
         "sam3d_source_root": sam3d_source_root,
-        "source_import_ok": False,
+        "source_import_ok": None,
+        "model_code_import_ok": None,
         "sam3d_module_file": None,
         "torch_version": None,
         "torch_cuda_version": None,
         "gpu_name": None,
-        "model_load_ok": False,
+        "model_load_ok": None,
         "sam3d_load_time_s": None,
-        "inference_ok": False,
+        "inference_ok": None,
         "sam3d_inference_time_s": None,
         "peak_vram_mb": None,
-        "person_detected": False,
+        "person_detected": None,
         "bbox_used": None,
         "image_width": None,
         "image_height": None,
         "output_schema": {},
-        "interchange_written": False,
+        "interchange_written": None,
         "error": None,
     }
 
@@ -142,24 +174,25 @@ def main() -> int:
         # --- SAM3D_SOURCE_IMPORT (Task 03D) ---
         # Must succeed BEFORE any checkpoint/model-loading is attempted, so a
         # missing-import failure here is never misreported as SAM3D_MODEL_LOAD_FAILURE.
+        # Task 03E: relies ONLY on this script's own sys.path.insert() from the explicit
+        # sam3d_source_root argument -- never on an ambient/caller-supplied PYTHONPATH.
         telemetry["stage"] = "source_import"
         try:
             validated_root = validate_sam3d_source_root(sam3d_source_root)
         except Sam3dSourceRootError as exc:
+            telemetry["source_import_ok"] = False
             telemetry["status"] = "source_import_failure"
             telemetry["error"] = f"SAM3D_SOURCE_IMPORT_FAILURE: {exc}"
             _write(telemetry_path, telemetry)
             return 1
 
         if validated_root not in sys.path:
-            sys.path.insert(0, validated_root)  # belt-and-suspenders alongside the notebook's PYTHONPATH
+            sys.path.insert(0, validated_root)
 
         try:
             import sam_3d_body
-            from sam_3d_body.build_models import load_sam_3d_body
-            from sam_3d_body.data.utils.io import load_image
-            from sam_3d_body.sam_3d_body_estimator import SAM3DBodyEstimator
         except Exception as exc:  # noqa: BLE001 -- any import-time failure here is SAM3D_SOURCE_IMPORT_FAILURE
+            telemetry["source_import_ok"] = False
             telemetry["status"] = "source_import_failure"
             telemetry["error"] = f"SAM3D_SOURCE_IMPORT_FAILURE: {type(exc).__name__}: {exc}"
             _write(telemetry_path, telemetry)
@@ -169,6 +202,7 @@ def main() -> int:
         print("sam_3d_body.__file__ =", sam_3d_body.__file__)
 
         if not resolved_module_is_under_root(sam_3d_body.__file__, validated_root):
+            telemetry["source_import_ok"] = False
             telemetry["status"] = "source_import_failure"
             telemetry["error"] = (
                 f"SAM3D_SOURCE_IMPORT_FAILURE: sam_3d_body imported from "
@@ -180,6 +214,26 @@ def main() -> int:
             return 1
 
         telemetry["source_import_ok"] = True
+
+        # --- SAM3D_MODEL_CODE_IMPORT (Task 03E) ---
+        # Distinct from SAM3D_SOURCE_IMPORT above: the bare `sam_3d_body` package
+        # importing cleanly does not guarantee its model-construction submodules do too
+        # (e.g. a missing sub-dependency only reachable from build_models/estimator code).
+        # Also distinct from SAM3D_MODEL_LOAD below: this is Python code constructing,
+        # not checkpoint/model assets being loaded from disk.
+        telemetry["stage"] = "model_code_import"
+        try:
+            from sam_3d_body.build_models import load_sam_3d_body
+            from sam_3d_body.data.utils.io import load_image
+            from sam_3d_body.sam_3d_body_estimator import SAM3DBodyEstimator
+        except Exception as exc:  # noqa: BLE001
+            telemetry["model_code_import_ok"] = False
+            telemetry["status"] = "model_code_import_failure"
+            telemetry["error"] = f"SAM3D_MODEL_CODE_IMPORT_FAILURE: {type(exc).__name__}: {exc}"
+            _write(telemetry_path, telemetry)
+            return 1
+
+        telemetry["model_code_import_ok"] = True
 
         import numpy as np
 
@@ -232,6 +286,7 @@ def main() -> int:
         if not outputs:
             telemetry["status"] = "ok_no_person_detected"
             telemetry["inference_ok"] = True  # ran without error; just produced no output
+            telemetry["person_detected"] = False  # attempted and genuinely found nobody, not "not attempted"
             _write(telemetry_path, telemetry)
             return 0
 
@@ -260,12 +315,26 @@ def main() -> int:
             telemetry["interchange_fields"] = write_summary
             telemetry["status"] = "ok"
         except AdapterError as exc:
+            telemetry["interchange_written"] = False
             telemetry["status"] = "mhr_schema_failure"
             telemetry["error"] = f"MHR_SCHEMA_FAILURE: {exc}"
 
     except Exception as exc:  # noqa: BLE001 -- this is a boundary worker, must never propagate a bare crash
         telemetry["status"] = "error"
         telemetry["error"] = f"[{telemetry['stage']}] {type(exc).__name__}: {exc}"
+        # Task 03E: a stage that was actually reached and crashed must report False, not
+        # leave its field at the None default -- a None here would misreport a real,
+        # attempted failure as NOT_ATTEMPTED (the same cascading-false-failure class of
+        # bug this task fixes, just in the opposite direction: never mask FAIL as
+        # NOT_ATTEMPTED either). Stages with no dedicated field (e.g. bbox_validation)
+        # correctly leave the next stage's field at None -- it genuinely never started.
+        _stage_field = {
+            "model_load": "model_load_ok",
+            "inference": "inference_ok",
+            "interchange_write": "interchange_written",
+        }.get(telemetry["stage"])
+        if _stage_field is not None and telemetry.get(_stage_field) is None:
+            telemetry[_stage_field] = False
         traceback.print_exc()
 
     _write(telemetry_path, telemetry)
