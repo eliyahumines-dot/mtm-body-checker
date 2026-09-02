@@ -6,6 +6,16 @@ notebook/code correction, authored and structurally validated but **not
 executed** by this agent. The next human Colab run is what actually tests
 it.
 
+**Update (Task 03D):** the real human Colab run of *this* document's
+notebook made real progress — `SAM3D_CORE_ENVIRONMENT: PASS` (torch/CUDA/
+GPU/pin all confirmed working for the first time) — but then failed with
+`ModuleNotFoundError: No module named 'sam_3d_body'` at `SAM3D_MODEL_LOAD`.
+The upstream repo was cloned but never put on the worker interpreter's
+module search path. See `docs/experiments/TASK03D_SAM3D_IMPORT_PATH_FIX.md`
+for the fix — a small, narrowly-scoped wiring correction; nothing this
+document describes (the dependency list, the torch pin, Detectron2/MoGe
+exclusion, Environment B) was changed.
+
 ## Actual observed failure (Task 03B's notebook, real Colab run)
 
 | Field | Value |

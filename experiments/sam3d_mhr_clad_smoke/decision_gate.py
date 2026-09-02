@@ -6,7 +6,7 @@ run and the Colab notebook's final cell (Task 03 section 15/18), rather
 than reimplementing the same classification inline in notebook prose.
 
 The original eleven ``FailureCategory`` values and six ``DecisionGate``
-values are taken verbatim from Task 03's specification; Task 03C adds six
+values are taken verbatim from Task 03's specification; Task 03C added six
 more failure categories (``WRONG_DEPENDENCY_CHUMPY``,
 ``TORCH_VERSION_DRIFT``, ``TORCHVISION_VERSION_DRIFT``,
 ``SAM3D_CORE_DEPENDENCY_FAILURE``, ``SAM3D_MODEL_LOAD_FAILURE``,
@@ -14,9 +14,17 @@ more failure categories (``WRONG_DEPENDENCY_CHUMPY``,
 after a real Colab run reported "Recorded failure categories: none"
 despite two observed build failures -- every install command's failure
 now gets a specific category (see ``install_log.py``), never silently
-just a `False` boolean. ``classify()`` maps a :class:`PipelineState` (a
-plain record of what happened at each stage) to exactly one gate, plus a
-short human-readable reason -- so the notebook never has to eyeball a
+just a `False` boolean. Task 03D adds one more,
+``SAM3D_SOURCE_IMPORT_FAILURE``, after a real Colab run with a working
+Environment A still failed with ``ModuleNotFoundError: No module named
+'sam_3d_body'`` -- the upstream repo root was never on the worker
+interpreter's module search path. This is now a distinct, earlier stage
+from ``SAM3D_MODEL_LOAD_FAILURE`` (Task 03D section 6: "A. Python cannot
+import sam_3d_body" vs. "B. load_sam_3d_body() imports successfully but
+checkpoint/model construction fails" -- only B is
+``SAM3D_MODEL_LOAD_FAILURE``). ``classify()`` maps a :class:`PipelineState`
+(a plain record of what happened at each stage) to exactly one gate, plus
+a short human-readable reason -- so the notebook never has to eyeball a
 pile of booleans to decide which of A-F applies.
 """
 
@@ -47,6 +55,11 @@ class FailureCategory(str, Enum):
     SAM3D_MODEL_LOAD_FAILURE = "SAM3D_MODEL_LOAD_FAILURE"
     SAM3D_CORE_INFERENCE_FAILURE = "SAM3D_CORE_INFERENCE_FAILURE"
 
+    # Task 03D addition -- distinct from SAM3D_MODEL_LOAD_FAILURE (section 6):
+    # this is Python failing to even import sam_3d_body (wrong/missing repo
+    # root on sys.path), not load_sam_3d_body() failing after a successful import.
+    SAM3D_SOURCE_IMPORT_FAILURE = "SAM3D_SOURCE_IMPORT_FAILURE"
+
 
 class DecisionGate(str, Enum):
     END_TO_END_MEASUREMENTS_PRODUCED = "A"
@@ -67,6 +80,7 @@ _ENVIRONMENT_FAILURES = {
     FailureCategory.TORCH_VERSION_DRIFT,
     FailureCategory.TORCHVISION_VERSION_DRIFT,
     FailureCategory.SAM3D_CORE_DEPENDENCY_FAILURE,
+    FailureCategory.SAM3D_SOURCE_IMPORT_FAILURE,
 }
 
 
@@ -84,6 +98,7 @@ class PipelineState:
     hf_auth_ok: bool | None = None
     checkpoint_downloaded: bool | None = None
     dependencies_installed: bool | None = None  # Task 03B: Environment A (SAM 3D Body) build, specifically
+    sam3d_source_import_ok: bool | None = None  # Task 03D: `import sam_3d_body` itself, distinct from model load
     sam3d_model_load_ok: bool | None = None  # Task 03C: load_sam_3d_body(), distinct from inference itself
     sam3d_inference_ok: bool | None = None
     mhr_schema_valid: bool | None = None
@@ -135,6 +150,15 @@ def classify(state: PipelineState) -> tuple[DecisionGate, str]:
             DecisionGate.DEPENDENCY_ENVIRONMENT_BLOCKED,
             f"Dependency installation did not converge to a working GPU-compatible "
             f"environment{detail}.",
+        )
+
+    if state.sam3d_source_import_ok is False:
+        return (
+            DecisionGate.DEPENDENCY_ENVIRONMENT_BLOCKED,
+            "SAM 3D Body's environment built, but `import sam_3d_body` itself failed "
+            "(the upstream repo root was not on the worker interpreter's module search "
+            "path, or resolved to an unrelated package) -- this precedes and is distinct "
+            "from load_sam_3d_body() failing after a successful import.",
         )
 
     if state.sam3d_model_load_ok is False:
@@ -208,13 +232,17 @@ def phase_summary(state: PipelineState) -> dict:
     ``PHASE_A_SUCCESSFUL`` flag -- deliberately not collapsed into a
     single letter grade the way :func:`classify` is.
 
-    Task 03C section 7 splits what Task 03B called ``SAM3D_ENVIRONMENT``/
-    ``SAM3D_INFERENCE`` into four Phase A boundaries
-    (``SAM3D_CORE_ENVIRONMENT``, ``SAM3D_MODEL_LOAD``,
-    ``SAM3D_CORE_INFERENCE``, ``MHR_PARAMS_SERIALIZED``), each
-    independently reportable, so a model-load failure is never conflated
-    with an inference-time failure or a serialization failure. Phase B's
-    two fields (``MHR_CLAD_ENVIRONMENT``, ``MHR_CLAD_EXTRACTION``) are
+    Task 03C section 7 split what Task 03B called ``SAM3D_ENVIRONMENT``/
+    ``SAM3D_INFERENCE`` into four Phase A boundaries; Task 03D inserts a
+    fifth, ``SAM3D_SOURCE_IMPORT``, between environment and model load --
+    a real Colab run showed environment build (torch/CUDA/GPU all working)
+    can succeed while `import sam_3d_body` itself still fails (wrong repo
+    root on the module search path), which is a distinct, earlier failure
+    than `load_sam_3d_body()` raising after a successful import. Each of
+    the five Phase A boundaries (``SAM3D_CORE_ENVIRONMENT``,
+    ``SAM3D_SOURCE_IMPORT``, ``SAM3D_MODEL_LOAD``, ``SAM3D_CORE_INFERENCE``,
+    ``MHR_PARAMS_SERIALIZED``) is independently reportable. Phase B's two
+    fields (``MHR_CLAD_ENVIRONMENT``, ``MHR_CLAD_EXTRACTION``) are
     unchanged from Task 03B.
 
     Does not replace :func:`classify`; both read the same
@@ -222,6 +250,7 @@ def phase_summary(state: PipelineState) -> dict:
     """
     fields = {
         "SAM3D_CORE_ENVIRONMENT": _phase_status(state.dependencies_installed),
+        "SAM3D_SOURCE_IMPORT": _phase_status(state.sam3d_source_import_ok),
         "SAM3D_MODEL_LOAD": _phase_status(state.sam3d_model_load_ok),
         "SAM3D_CORE_INFERENCE": _phase_status(state.sam3d_inference_ok),
         "MHR_PARAMS_SERIALIZED": _phase_status(state.mhr_schema_valid),
@@ -229,7 +258,10 @@ def phase_summary(state: PipelineState) -> dict:
         "MHR_CLAD_EXTRACTION": _phase_status(state.clad_body_measure_ok),
     }
 
-    phase_a_fields = ["SAM3D_CORE_ENVIRONMENT", "SAM3D_MODEL_LOAD", "SAM3D_CORE_INFERENCE", "MHR_PARAMS_SERIALIZED"]
+    phase_a_fields = [
+        "SAM3D_CORE_ENVIRONMENT", "SAM3D_SOURCE_IMPORT", "SAM3D_MODEL_LOAD",
+        "SAM3D_CORE_INFERENCE", "MHR_PARAMS_SERIALIZED",
+    ]
     fields["PHASE_A_SUCCESSFUL"] = "PASS" if all(fields[p] == "PASS" for p in phase_a_fields) else "FAIL"
 
     end_to_end = (
