@@ -18,6 +18,53 @@ real Google Colab, where a free GPU tier and unrestricted internet access
 real. Nothing in this document should be read as reporting an actual
 executed pipeline run or actual measurements — none were produced.
 
+## Update (Task 03B): actual human Colab run result
+
+The human ran this notebook in real Google Colab. Observed outcome:
+
+| Field | Value |
+|---|---|
+| Decision gate | **D — DEPENDENCY_ENVIRONMENT_BLOCKED** |
+| Reason | `CUDA_PYTORCH_MISMATCH` |
+| `gpu_available` | **True** |
+| `hf_auth_ok` | **True** |
+| `checkpoint_downloaded` | **True** |
+| `dependencies_installed` | False |
+| `sam3d_inference_ok` | False |
+| `mhr_schema_valid` / `mhr_reconstruction_ok` / `clad_body_measure_ok` | not reached (None) |
+| `measurements_produced` | False |
+
+So: GPU availability, Hugging Face authentication, and SAM 3D Body
+checkpoint access/download are all **confirmed working** — none of that
+needed re-investigation. The failure was purely in the dependency/runtime
+architecture: this notebook's section 4 installed SAM 3D Body's own
+dependency list into the same ambient Colab kernel that already had a
+working, GPU-driver-matched `torch`/`torchvision` pair — with no
+protection against a transitive dependency in that install list silently
+upgrading/downgrading either package. That is the most probable root
+cause of `CUDA_PYTORCH_MISMATCH`: once torch and torchvision (or torch and
+the host CUDA driver) fall out of the specific alignment Colab originally
+provisioned, torchvision's compiled CUDA ops (and potentially
+`detectron2`'s, built `--no-build-isolation` against whatever torch
+happened to be active at that moment) stop matching, and inference fails
+before producing any output.
+
+**Why the architecture changed to two fully isolated environments** (not
+just "isolate clad-body" as this notebook originally did): the failure
+occurred on the SAM 3D Body side, not the clad-body/pymomentum side this
+document's earlier revision anticipated. The fix generalizes the same
+isolation principle to *both* halves of the pipeline: Environment A now
+gets its own dedicated venv, explicitly pinned to reproduce (not guess)
+the ambient kernel's own already-GPU-working torch/torchvision version
+strings, verified to have survived every subsequent install step before
+proceeding — so a transitive dependency can perturb Environment A's own
+venv without ever touching the ambient kernel's working state, and the
+notebook catches it immediately (via a post-install version check) rather
+than discovering it only when inference fails. See
+`docs/experiments/TASK03B_DEPENDENCY_RESOLUTION.md` for the full design
+and reasoning, including why this diagnosis — while well-evidenced — is
+still a hypothesis pending confirmation on the next real Colab run.
+
 ## Notebook setup
 
 `notebooks/TASK03_SAM3D_MHR_CLAD_COLAB.ipynb` — 35 cells (18 markdown, 17
@@ -208,16 +255,19 @@ apply exactly as documented in `LICENSE_AND_COMMERCIAL_USE.md`.
 
 ## Decision gate
 
-**C. GPU_INSUFFICIENT** — for this agent's own execution attempt in this
-sandbox, which has no GPU at all. This is the only honest classification
-available without fabricating results: the notebook was authored,
-structurally validated (valid nbformat, every cell's Python syntax
-checked), and reuses/extends Task 02's tested code, but **zero cells were
-actually executed** by this agent, and no numeric measurement of any kind
-was produced. Do not read this as a claim that the pipeline will fail in
-real Colab — it is a direct statement that this agent's own environment
-cannot run it, exactly per the notebook's own designed behavior in that
-situation. The real classification (plausibly A, B, D, or E depending on
-what the human's Colab run actually encounters) can only be determined by
-that run; re-running this smoke test with the human's actual Colab output
-is the natural next step, not a new task.
+Two classifications apply, for two different things:
+
+- **This agent's own execution attempt of the original Task 03 notebook:
+  C. GPU_INSUFFICIENT** — this sandbox has no GPU at all, so zero cells
+  were executed here; the notebook was authored and structurally
+  validated only. This was never a claim that the pipeline would fail in
+  real Colab.
+- **The human's actual Colab run of that notebook: D.
+  DEPENDENCY_ENVIRONMENT_BLOCKED**, reason `CUDA_PYTORCH_MISMATCH` — see
+  the "Update (Task 03B)" section above. This is real evidence, not this
+  agent's speculation, and it is what Task 03B's redesigned notebook
+  (`docs/experiments/TASK03B_DEPENDENCY_RESOLUTION.md`,
+  `notebooks/TASK03_SAM3D_MHR_CLAD_COLAB.ipynb`) targets directly. That
+  redesigned notebook has, in turn, also not been executed by this
+  agent (same GPU limitation) — its own decision gate is reported
+  separately in the Task 03B document.

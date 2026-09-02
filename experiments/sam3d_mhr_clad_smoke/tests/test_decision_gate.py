@@ -4,7 +4,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
-from decision_gate import DecisionGate, FailureCategory, PipelineState, classify
+from decision_gate import DecisionGate, FailureCategory, PipelineState, classify, phase_summary
 
 
 def test_no_gpu_is_gpu_insufficient():
@@ -141,3 +141,70 @@ def test_all_failure_categories_are_distinct_strings():
 def test_all_decision_gates_are_distinct_single_letters():
     values = [g.value for g in DecisionGate]
     assert values == ["A", "B", "C", "D", "E", "F"]
+
+
+# --- Task 03B: phase_summary() ---
+
+def test_phase_summary_all_not_attempted_on_fresh_state():
+    fields = phase_summary(PipelineState())
+    assert fields["SAM3D_ENVIRONMENT"] == "NOT_ATTEMPTED"
+    assert fields["SAM3D_INFERENCE"] == "NOT_ATTEMPTED"
+    assert fields["MHR_CLAD_ENVIRONMENT"] == "NOT_ATTEMPTED"
+    assert fields["MHR_CLAD_EXTRACTION"] == "NOT_ATTEMPTED"
+    assert fields["END_TO_END"] == "FAIL"
+    assert fields["first_failing_boundary"] is None  # nothing FAILED, just not attempted
+
+
+def test_phase_summary_matches_observed_task03b_state():
+    """Reproduces the exact state reported from the human's real Colab run:
+    gpu/hf/checkpoint all fine, dependencies_installed False (Environment A),
+    everything downstream never attempted."""
+    state = PipelineState(
+        gpu_available=True, hf_auth_ok=True, checkpoint_downloaded=True,
+        dependencies_installed=False, sam3d_inference_ok=False,
+    )
+    fields = phase_summary(state)
+    assert fields["SAM3D_ENVIRONMENT"] == "FAIL"
+    assert fields["SAM3D_INFERENCE"] == "FAIL"
+    assert fields["MHR_CLAD_ENVIRONMENT"] == "NOT_ATTEMPTED"
+    assert fields["MHR_CLAD_EXTRACTION"] == "NOT_ATTEMPTED"
+    assert fields["END_TO_END"] == "FAIL"
+    assert fields["first_failing_boundary"] == "SAM3D_ENVIRONMENT"
+
+
+def test_phase_summary_first_failing_boundary_is_earliest_not_first_recorded():
+    state = PipelineState(
+        gpu_available=True, dependencies_installed=True, sam3d_inference_ok=True,
+        mhr_clad_environment_ok=False, clad_body_measure_ok=None,
+    )
+    fields = phase_summary(state)
+    assert fields["first_failing_boundary"] == "MHR_CLAD_ENVIRONMENT"
+
+
+def test_phase_summary_full_success_is_end_to_end_pass():
+    state = PipelineState(
+        gpu_available=True, hf_auth_ok=True, checkpoint_downloaded=True,
+        dependencies_installed=True, sam3d_inference_ok=True, mhr_schema_valid=True,
+        mhr_clad_environment_ok=True, mhr_reconstruction_ok=True, clad_body_measure_ok=True,
+        measurements={"height_cm": 170.0},
+    )
+    fields = phase_summary(state)
+    assert fields["END_TO_END"] == "PASS"
+    assert fields["first_failing_boundary"] is None
+
+
+def test_phase_summary_end_to_end_fails_if_measurements_empty_despite_flags_true():
+    state = PipelineState(
+        gpu_available=True, dependencies_installed=True, sam3d_inference_ok=True,
+        mhr_clad_environment_ok=True, clad_body_measure_ok=True, measurements=None,
+    )
+    fields = phase_summary(state)
+    assert fields["END_TO_END"] == "FAIL"
+
+
+def test_phase_summary_returns_exactly_six_keys():
+    fields = phase_summary(PipelineState())
+    assert set(fields.keys()) == {
+        "SAM3D_ENVIRONMENT", "SAM3D_INFERENCE", "MHR_CLAD_ENVIRONMENT",
+        "MHR_CLAD_EXTRACTION", "END_TO_END", "first_failing_boundary",
+    }
